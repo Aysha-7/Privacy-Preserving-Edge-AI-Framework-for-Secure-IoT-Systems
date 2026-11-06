@@ -1,0 +1,203 @@
+<title>Authorised Personnel Only</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=VT323&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#020804;--g:#39ff6a;--g2:#1fb84a;--gd:#0f5a27;--red:#ff4d4d;--amber:#ffd24a;--txt:#c9ffd8;
+ --line:#0f5a27;--muted:#1fb84a;--cyan:#39ff6a;--green:#39ff6a;
+ --mono:"IBM Plex Mono",ui-monospace,Consolas,"Courier New",monospace;--pix:"VT323","IBM Plex Mono",Consolas,monospace}
+*{box-sizing:border-box;margin:0}
+html{background:var(--bg)}
+body{background:var(--bg);color:var(--g);font:600 17px/1.5 var(--mono);min-height:100vh;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:60;background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px),radial-gradient(ellipse at center,transparent 58%,rgba(0,0,0,.65) 100%)}
+body::after{content:"";position:fixed;left:0;right:0;height:140px;top:-140px;pointer-events:none;z-index:59;background:linear-gradient(180deg,transparent,rgba(57,255,106,.07),transparent);animation:sweep 7s linear infinite}
+@keyframes sweep{to{top:100%}}
+@keyframes blink{50%{opacity:0}}
+a{color:inherit}
+.wrap{max-width:1300px;margin:0 auto;padding:0 clamp(14px,3vw,40px) 50px}
+.ticker{display:flex;justify-content:space-between;gap:20px;font-size:15px;color:var(--g2);padding:12px 0 6px;white-space:nowrap;overflow:hidden}
+.rule2{border:0;border-top:3px solid var(--g)}.rule1{border:0;border-top:1px dashed var(--g2)}
+nav.nav{display:flex;gap:6px 38px;align-items:center;padding:12px 0;font-size:19px;flex-wrap:wrap}
+nav.nav a,nav.nav .pill{font:700 19px var(--mono);color:var(--g);text-decoration:none}
+nav.nav a:hover{background:var(--g);color:var(--bg)}
+nav.nav .sp{flex:1}
+.hidden{display:none!important}
+.title{font:400 clamp(46px,6vw,84px)/.9 var(--pix);letter-spacing:.04em;text-shadow:0 0 14px rgba(57,255,106,.6);margin:22px 0 6px}
+.warn{color:var(--amber);font-size:17px;font-weight:700}
+.intro{color:var(--txt);max-width:62ch;margin:10px 0 18px;font-size:18px}
+.lockgrid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(240px,420px);gap:20px 40px;align-items:center}
+canvas#eye{width:100%;height:auto;display:block;filter:drop-shadow(0 0 6px rgba(57,255,106,.5))}
+.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin:16px 0}
+.role{background:rgba(57,255,106,.03);border:3px solid var(--g2);padding:16px 16px 14px;cursor:pointer;text-align:left;color:var(--g);font:inherit;position:relative}
+.role:hover{border-color:var(--g);background:rgba(57,255,106,.09)}
+.role.sel{border-color:var(--g);background:var(--g);color:var(--bg)}
+.role.sel span{color:#04210d}
+.role .ico{font:400 38px/1 var(--pix);letter-spacing:.04em}
+.role b{display:block;margin:8px 0 4px;font-size:20px}
+.role span{color:var(--g2);font-size:15px;display:block}
+.role .off{color:var(--red);font-size:14px;margin-top:6px}
+.unlock{border:3px solid var(--g);padding:16px;display:flex;gap:12px;flex-wrap:wrap;align-items:center;background:rgba(57,255,106,.03)}
+input[type=password]{flex:1;min-width:200px;background:#000;border:2px solid var(--g2);color:var(--g);padding:13px 14px;font:700 21px var(--mono);letter-spacing:.14em;outline:none}
+input[type=password]:focus{box-shadow:0 0 0 3px var(--amber)}
+button.primary{background:var(--g);color:var(--bg);border:2px solid var(--g);padding:13px 24px;font:700 19px var(--mono);cursor:pointer;letter-spacing:.05em}
+button.primary:hover{background:var(--txt)}
+button.ghost{background:transparent;color:var(--g);border:2px solid var(--g);padding:8px 16px;font:700 17px var(--mono);cursor:pointer}
+button.ghost:hover{background:var(--g);color:var(--bg)}
+button:focus-visible,a:focus-visible,.role:focus-visible,.rec:focus-visible{outline:3px solid var(--amber);outline-offset:3px}
+button:disabled{opacity:.5;cursor:default}
+.err{color:var(--red);font-size:18px;font-weight:700;margin-top:10px;min-height:24px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.pill{border:2px solid var(--g2);padding:5px 12px;font-size:16px;color:var(--g2)}
+.pill b{color:var(--g)}
+.cols{display:grid;grid-template-columns:340px 1fr;gap:20px}
+@media(max-width:900px){.cols,.lockgrid{grid-template-columns:1fr}}
+.list,.detail{border:3px solid var(--g);padding:14px;position:relative;background:rgba(57,255,106,.025);min-width:0}
+.rec{display:block;width:100%;text-align:left;background:transparent;border:2px solid var(--gd);color:var(--g);font:inherit;padding:10px 12px;margin-bottom:10px;cursor:pointer}
+.rec:hover,.rec.sel{border-color:var(--g);background:rgba(57,255,106,.1)}
+.rec small{display:block;color:var(--g2);margin-top:3px;font-size:13px;word-break:break-all}
+.tag{font-size:13px;padding:1px 8px;border:2px solid var(--g2);color:var(--g2);margin-left:8px}
+.empty{color:var(--g2);padding:30px 10px;text-align:center;font-size:18px}
+.step{display:flex;gap:12px;align-items:flex-start;padding:8px 0;opacity:0;transform:translateY(6px);animation:in .4s forwards}
+@keyframes in{to{opacity:1;transform:none}}
+.step .dot{width:28px;height:28px;display:grid;place-items:center;font-size:17px;flex:none;background:var(--g);color:var(--bg);font-weight:800}
+.step.bad .dot{background:var(--red);color:#fff}
+.step b{font-size:18px}.step span{display:block;color:var(--g2);font-size:14px;word-break:break-all}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:14px 0}
+.tile{border:3px solid var(--g);padding:10px 12px}
+.tile small{color:var(--g2);font-size:15px;font-weight:700}
+.tile .v{font:400 44px/1 var(--pix);color:var(--g);text-shadow:0 0 10px rgba(57,255,106,.5)}
+h3{margin:20px 0 8px;font:400 30px/1 var(--pix);letter-spacing:.04em;color:var(--g)}
+h3::before{content:">_ ";color:var(--g2)}
+table{width:100%;border-collapse:collapse}
+td{padding:9px 8px;border-bottom:1px dashed var(--gd);font-size:16px;vertical-align:top;color:var(--txt)}
+td:first-child{color:var(--g2);width:42%;font-weight:700}
+img.shot{width:100%;max-width:480px;border:3px solid var(--g);image-rendering:pixelated;background:#000;filter:drop-shadow(0 0 6px rgba(57,255,106,.4))}
+.note{color:var(--g2);font-size:15px;margin-top:14px}
+.hazard{height:14px;background:repeating-linear-gradient(135deg,var(--g) 0 8px,transparent 8px 16px);border-top:2px solid var(--g);border-bottom:2px solid var(--g);margin-top:34px}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="ticker"><span>SECURE-IOT(EDGE) 2026</span><span id="vclk">--:--:--</span><span>AUTHORISED PERSONNEL ONLY</span><span>VAULT.....SEALED</span></div>
+  <hr class="rule2">
+  <nav class="nav"><a href="/">&larr; SUMMARY</a><a href="/pipeline">COMMAND CENTER</a><span class="sp"></span><span id="timer" class="pill hidden"></span></nav>
+  <hr class="rule1">
+  <div class="title">ENCRYPTED VAULT</div>
+  <div class="warn">&gt;_ authorised personnel only</div>
+
+  <main>
+    <section id="lockView">
+      <div class="lockgrid">
+        <div>
+          <p class="intro">Sensitive details are stored only as AES-256-GCM ciphertext in the cloud. Choose your role and enter its password to fetch, verify and decrypt them.</p>
+          <div class="roles" id="roles"></div>
+          <div class="unlock">
+            <input id="pw" type="password" placeholder="Role password" autocomplete="off">
+            <button class="primary" id="unlockBtn">[ UNLOCK ]</button>
+          </div>
+          <div class="err" id="err"></div>
+        </div>
+        <canvas id="eye" width="420" height="260" aria-label="Watching eye graphic"></canvas>
+      </div>
+    </section>
+
+    <section id="openView" class="hidden">
+      <div class="bar">
+        <div class="pill">Signed in as <b id="roleName"></b></div>
+        <button class="ghost" id="lockBtn">[ LOCK NOW ]</button>
+      </div>
+      <div class="cols">
+        <div class="list"><div id="records"></div></div>
+        <div class="detail" id="detail"><div class="empty">Select a record to verify and decrypt it.</div></div>
+      </div>
+    </section>
+  </main>
+  <div class="hazard"></div>
+</div>
+<script>
+(function(){
+"use strict";
+/* Halftone eye: a dot-matrix drawing that follows the pointer, blinks and glitches. */
+function HalftoneEye(canvas, cell){
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+  var gw = Math.floor(W / cell), gh = Math.floor(H / cell);
+  var look = {x:0, y:0}, tgt = {x:0, y:0}, blink = 0, blinkAt = 60, frame = 0;
+  var wipe = -1, wipeDir = 1, nextWipe = 90;
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var green = (getComputedStyle(document.documentElement).getPropertyValue("--g") || "#39ff6a").trim();
+  window.addEventListener("pointermove", function(e){
+    var r = canvas.getBoundingClientRect();
+    tgt.x = Math.max(-1, Math.min(1, (e.clientX - (r.left + r.width / 2)) / (window.innerWidth / 2)));
+    tgt.y = Math.max(-1, Math.min(1, (e.clientY - (r.top + r.height / 2)) / (window.innerHeight / 2)));
+  });
+  function lum(i, j, open, lx, ly){
+    var cx = gw / 2, cy = gh / 2;
+    var a = gw * 0.47, b = gh * 0.40 * open;
+    var nx = (i - cx) / a;
+    if (Math.abs(nx) >= 1) return 0;
+    var lid = Math.pow(1 - nx * nx, 0.85) * b;
+    var dy = j - cy;
+    var edge = Math.abs(Math.abs(dy) - lid);
+    if (Math.abs(dy) > lid + 1.2) return 0;
+    if (edge < 1.1) return 1;
+    if (Math.abs(dy) > lid) return 0;
+    var ix = cx + lx * gw * 0.12, iy = cy + ly * gh * 0.12;
+    var r = gh * 0.31;
+    var d = Math.sqrt((i - ix) * (i - ix) + (j - iy) * (j - iy));
+    var ang = Math.atan2(j - iy, i - ix);
+    var v = 0.22 + 0.10 * (1 - Math.abs(nx));
+    if (d < r) {
+      v = 0.45 + 0.30 * (d / r) + 0.18 * Math.sin(ang * 16 + d * 0.4);
+      if (d > r * 0.9) v = 0.9;
+      if (d < r * 0.40) v = 0.05;
+    }
+    var hx = ix - r * 0.35, hy = iy - r * 0.35;
+    if ((i - hx) * (i - hx) + (j - hy) * (j - hy) < 3.2) v = 1;
+    var shade = Math.max(0, 1 - Math.abs(dy) / (lid + 0.01));
+    return Math.max(0, Math.min(1, v * (0.55 + 0.45 * shade)));
+  }
+  function draw(){
+    frame++;
+    look.x += (tgt.x - look.x) * 0.12; look.y += (tgt.y - look.y) * 0.12;
+    if (!reduce) {
+      if (frame === blinkAt) { blink = 0.001; }
+      if (blink > 0) { blink += 0.16; if (blink >= 2) { blink = 0; blinkAt = frame + 70 + Math.floor(Math.random() * 120); } }
+      if (frame === nextWipe) { wipe = 0; wipeDir = 1; }
+      if (wipe >= 0) {
+        wipe += 0.045 * wipeDir;
+        if (wipe >= 1) { wipeDir = -1; wipe = 1; nextWipe = Infinity; setTimeout(function(){ wipeDir = -1; }, 0); }
+        if (wipeDir === -1 && wipe <= 0) { wipe = -1; nextWipe = frame + 120 + Math.floor(Math.random() * 160); }
+      }
+    }
+    var open = blink > 0 ? Math.abs(1 - blink) : 1;
+    open = Math.max(0.04, open);
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = green;
+    var glitchRows = {};
+    if (!reduce && Math.random() < 0.05) {
+      for (var g = 0; g < 4; g++) glitchRows[Math.floor(Math.random() * gh)] = Math.floor(Math.random() * 9 - 4);
+    }
+    for (var j = 0; j < gh; j++) {
+      var shift = glitchRows[j] || 0;
+      for (var i = 0; i < gw; i++) {
+        if (wipe >= 0 && (i / gw + j / gh * 0.6) / 1.6 < wipe) continue;
+        var l = lum(i - shift, j, open, look.x, look.y);
+        if (l <= 0.03) continue;
+        var rad = cell * 0.5 * Math.pow(l, 0.75);
+        ctx.beginPath();
+        ctx.arc(i * cell + cell / 2 + shift * 0, j * cell + cell / 2, rad, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+  }
+  var timer = setInterval(draw, 55);
+  draw();
+  return function stop(){ clearInterval(timer); };
+}
+
+HalftoneEye(document.getElementById("eye"),5);
+function c(){document.getElementById("vclk").textContent=new Date().toLocaleTimeString([], {hour12:false})}
+c();setInterval(c,1000);
+})();
+</script>

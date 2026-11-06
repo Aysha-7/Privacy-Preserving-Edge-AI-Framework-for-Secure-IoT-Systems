@@ -1,0 +1,71 @@
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-10-31T15:27:16.174763+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_6b835c17f5ce4eb18289c375cb698774","result":"ok","role":"factory_manager","time_utc":"2026-10-31T15:27:24.514360+00:00"}
+{"action":"lock","client":"192.168.1.38","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-10-31T15:27:56.898690+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:28:07.029811+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:28:12.923334+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:28:18.332514+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_3f54c2ffc19d414d8562537fa04aa4cc","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:29:00.829800+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:29:06.559358+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:29:53.678219+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:29:58.874051+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_3f54c2ffc19d414d8562537fa04aa4cc","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:30:05.416434+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_9d1504aa451f47e890cc2cd877770b25","result":"ok","role":"homeowner","time_utc":"2026-10-31T15:30:10.598391+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"doctor","time_utc":"2026-10-31T21:30:28.252776+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_fde53fba2a9b4d5bb86b1cadeef22383","result":"ok","role":"doctor","time_utc":"2026-10-31T21:30:37.684082+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_fde53fba2a9b4d5bb86b1cadeef22383","result":"ok","role":"doctor","time_utc":"2026-10-31T21:30:41.599592+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"wrong password","role":"homeowner","time_utc":"2026-11-01T05:53:13.928451+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:22.770060+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:29.348028+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:33.790869+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:54.205270+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:57.098876+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:53:58.858068+00:00"}
+{"action":"view image","client":"192.168.1.38","event_id":"image_1bd77e1797e648aa8031f18f9fdabfe1","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:54:01.767462+00:00"}
+{"action":"lock","client":"192.168.1.38","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-01T05:54:12.252931+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-01T05:54:38.590055+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_e8ecdfaf2823472185e2d319c9358325","result":"ok","role":"factory_manager","time_utc":"2026-11-01T05:54:43.765618+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-01T16:00:35.608087+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_bf1920c5722344499dd41991aa00b742","result":"ok","role":"factory_manager","time_utc":"2026-11-01T16:00:42.776795+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"wrong password","role":"homeowner","time_utc":"2026-11-01T19:39:03.118667+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-01T19:39:12.812399+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_95c47e443585453ba8b83d6c5374f6cf","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:17.278855+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_95c47e443585453ba8b83d6c5374f6cf","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:19.401379+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_95c47e443585453ba8b83d6c5374f6cf","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:21.493590+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_be9902e0050545b0b58f2a6f13304f0f","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:23.513428+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_95c47e443585453ba8b83d6c5374f6cf","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:23.608191+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"image_708f20c8bb0b4d24a1f89fa27b06643c","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:24.840924+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_4c33c3155c60403e8ca11863427772c7","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:27.048014+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_6524f3f9bad548eeae8f8e4ee2dbd4c1","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:31.061064+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_3f54c2ffc19d414d8562537fa04aa4cc","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-01T19:39:36.791559+00:00"}
+{"action":"unlock","client":"192.168.1.38","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-01T22:11:16.642455+00:00"}
+{"action":"decrypt","client":"192.168.1.38","event_id":"event_c6c8cd2778c74e91bda1af82c24d902b","result":"ok","role":"factory_manager","time_utc":"2026-11-01T22:11:21.478054+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-02T04:37:56.236613+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_e1b4e3d31cb1439dab9993a52bc7b646","result":"ok","role":"factory_manager","time_utc":"2026-11-02T04:38:04.770234+00:00"}
+{"action":"lock","client":"172.21.1.237","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-02T04:38:19.041273+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:38:27.822383+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_3e12f9548b0d4a658afc703ebe2b36fb","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:38:32.791536+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_3e12f9548b0d4a658afc703ebe2b36fb","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:38:38.387628+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_9f93504c918d4d628f7348b170291a6b","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:38:47.392324+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_95c47e443585453ba8b83d6c5374f6cf","result":"Could not read the Fabric ledger.","role":"homeowner","time_utc":"2026-11-02T04:38:49.046774+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_3e12f9548b0d4a658afc703ebe2b36fb","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:38:58.370606+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_3e12f9548b0d4a658afc703ebe2b36fb","result":"ok","role":"homeowner","time_utc":"2026-11-02T04:39:05.670192+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-02T05:11:22.187021+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T05:11:30.006052+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T05:11:36.185051+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_55b6ed483b7f4ac99b6685499758a354","result":"ok","role":"homeowner","time_utc":"2026-11-02T05:12:07.940238+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T05:12:13.305559+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-02T07:22:12.307236+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T07:22:17.792749+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_55b6ed483b7f4ac99b6685499758a354","result":"ok","role":"homeowner","time_utc":"2026-11-02T07:22:21.315200+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T07:22:28.890182+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:00:35.328713+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:00:41.267141+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_55b6ed483b7f4ac99b6685499758a354","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:00:41.593890+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:00:46.783721+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-02T09:21:52.127831+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_12de66b65b6b4b9aaa442b735aae89a2","result":"ok","role":"factory_manager","time_utc":"2026-11-02T09:21:57.413323+00:00"}
+{"action":"lock","client":"172.21.1.237","event_id":"","result":"ok","role":"factory_manager","time_utc":"2026-11-02T09:23:04.681137+00:00"}
+{"action":"unlock","client":"172.21.1.237","event_id":"","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:23:15.027705+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:23:19.639144+00:00"}
+{"action":"decrypt","client":"172.21.1.237","event_id":"event_55b6ed483b7f4ac99b6685499758a354","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:23:20.351424+00:00"}
+{"action":"view image","client":"172.21.1.237","event_id":"image_57fbcbc1ab874bc792d6485fe1b2e9b2","result":"ok","role":"homeowner","time_utc":"2026-11-02T09:23:27.236741+00:00"}

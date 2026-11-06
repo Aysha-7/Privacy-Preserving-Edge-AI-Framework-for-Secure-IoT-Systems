@@ -1,0 +1,31 @@
+{
+  "factory": {
+    "sensor_id": "HUM-DHT11-A07",
+    "sensor_model": "DHT11 + ESP32 (TinyML humidity classifier)",
+    "plant": "Riverside Textile Mill (demo)",
+    "department": "Dyeing and Finishing",
+    "location": "Bay 3, Rack C, 2.4 m above floor",
+    "floor": "Ground floor, East wing",
+    "responsible_manager": "Mr. R. Karthik (demo)",
+    "safe_humidity_limit": "70 %",
+    "installed_on": "2026-08-14"
+  },
+  "patient": {
+    "patient_id": "PT-20418",
+    "patient_name": "Meera Nair (demo)",
+    "age": 54,
+    "ward": "Cardiology Ward 2",
+    "bed": "Bed 14",
+    "attending_doctor": "Dr. S. Iyer (demo)",
+    "monitor": "Wrist pulse monitor (HW-627)",
+    "normal_bpm_range": "60 to 100"
+  },
+  "home": {
+    "owner": "Ameera",
+    "room": "Living room",
+    "camera_position": "Above the front door, facing the hallway",
+    "address": "12, Lakeview Residency, Chennai (demo address)",
+    "emergency_contact": "Family member (demo)",
+    "security_mode": "Armed"
+  }
+}

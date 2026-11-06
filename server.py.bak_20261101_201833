@@ -1,0 +1,5438 @@
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    render_template_string,
+    redirect,
+    url_for,
+    session,
+)
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    render_template_string,
+    redirect,
+    url_for,
+    session,
+    Response,
+)
+from datetime import datetime, timezone
+from pathlib import Path
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from flask_wtf.csrf import CSRFProtect
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.security import check_password_hash
+from functools import wraps
+
+import base64
+import csv
+import os
+import threading
+import time
+import math
+import secrets
+import requests
+import json
+import hashlib
+import io
+import uuid
+import cloudinary
+import cloudinary.api
+import cloudinary.uploader
+
+
+# ==================================================
+# FLASK CONFIGURATION
+# ==================================================
+
+app = Flask(__name__)
+
+app.config.update(
+    SECRET_KEY=os.environ.get("FLASK_SECRET_KEY", ""),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=False,  # Set True when using HTTPS
+    PERMANENT_SESSION_LIFETIME=1800,
+)
+
+if not app.config["SECRET_KEY"]:
+    raise RuntimeError("FLASK_SECRET_KEY is not configured.")
+
+DASHBOARD_PASSWORD_HASH = os.environ.get(
+    "DASHBOARD_PASSWORD_HASH", ""
+).strip()
+
+if not DASHBOARD_PASSWORD_HASH:
+    raise RuntimeError("DASHBOARD_PASSWORD_HASH is not configured.")
+
+csrf = CSRFProtect(app)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+)
+
+
+# ==================================================
+# HYPERLEDGER FABRIC CONFIGURATION
+# ==================================================
+
+FABRIC_GATEWAY_URL = os.environ.get(
+    "FABRIC_GATEWAY_URL",
+    "http://localhost:8080/events",
+).strip()
+
+FABRIC_GATEWAY_TOKEN = os.environ.get(
+    "FABRIC_GATEWAY_TOKEN",
+    "",
+).strip()
+
+
+# ==================================================
+# FILES AND LOCKS
+# ==================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+DATA_FILE = BASE_DIR / "sensor_data.csv"
+CHAIN_FILE = BASE_DIR / "blockchain.jsonl"
+CAMERA_EVENTS_FILE = BASE_DIR / "camera_events.jsonl"
+
+CSV_LOCK = threading.Lock()
+CAMERA_LOCK = threading.Lock()
+CHAIN_LOCK = threading.Lock()
+
+CSV_COLUMNS = [
+    "timestamp_utc",
+    "device_id",
+    "temperature_c",
+    "humidity_percent",
+    "prediction",
+]
+
+GENESIS_HASH = "0" * 64
+
+
+# ==================================================
+# SENSOR AES-256-GCM CONFIGURATION
+# ==================================================
+
+key_hex = os.environ.get("AES_GCM_KEY_HEX", "").strip()
+
+if len(key_hex) != 64:
+    raise RuntimeError(
+        "AES_GCM_KEY_HEX must contain a 64-character hexadecimal key."
+    )
+
+try:
+    AES_KEY = bytes.fromhex(key_hex)
+except ValueError as exc:
+    raise RuntimeError(
+        "AES_GCM_KEY_HEX is not valid hexadecimal."
+    ) from exc
+
+if len(AES_KEY) != 32:
+    raise RuntimeError("AES-256 requires a 32-byte key.")
+
+AES = AESGCM(AES_KEY)
+
+
+# ==================================================
+# CAMERA AES-256-GCM CONFIGURATION
+# ==================================================
+
+CAMERA_AES_KEY_HEX = os.environ.get(
+    "CAMERA_AES_GCM_KEY_HEX",
+    "",
+).strip()
+
+if len(CAMERA_AES_KEY_HEX) != 64:
+    raise RuntimeError(
+        "CAMERA_AES_GCM_KEY_HEX must contain a 64-character hex key."
+    )
+
+try:
+    CAMERA_AES_KEY = bytes.fromhex(CAMERA_AES_KEY_HEX)
+except ValueError as exc:
+    raise RuntimeError(
+        "CAMERA_AES_GCM_KEY_HEX must be hexadecimal."
+    ) from exc
+
+if len(CAMERA_AES_KEY) != 32:
+    raise RuntimeError("Camera AES key must be 32 bytes.")
+
+CAMERA_AES = AESGCM(CAMERA_AES_KEY)
+
+
+# ==================================================
+# CLOUDINARY CONFIGURATION
+# ==================================================
+
+CLOUD_NAME = os.environ.get(
+    "CLOUDINARY_CLOUD_NAME", ""
+).strip()
+
+CLOUD_API_KEY = os.environ.get(
+    "CLOUDINARY_API_KEY", ""
+).strip()
+
+CLOUD_API_SECRET = os.environ.get(
+    "CLOUDINARY_API_SECRET", ""
+).strip()
+
+CLOUD_STORAGE_KEY_HEX = os.environ.get(
+    "CLOUD_STORAGE_KEY_HEX", ""
+).strip()
+
+if not CLOUD_NAME or not CLOUD_API_KEY or not CLOUD_API_SECRET:
+    raise RuntimeError("Cloudinary environment variables are missing.")
+
+if len(CLOUD_STORAGE_KEY_HEX) != 64:
+    raise RuntimeError(
+        "CLOUD_STORAGE_KEY_HEX must be 64 hexadecimal characters."
+    )
+
+try:
+    CLOUD_STORAGE_KEY = bytes.fromhex(CLOUD_STORAGE_KEY_HEX)
+except ValueError as exc:
+    raise RuntimeError(
+        "CLOUD_STORAGE_KEY_HEX is invalid."
+    ) from exc
+
+if len(CLOUD_STORAGE_KEY) != 32:
+    raise RuntimeError(
+        "Cloud storage AES-256 requires a 32-byte key."
+    )
+
+cloudinary.config(
+    cloud_name=CLOUD_NAME,
+    api_key=CLOUD_API_KEY,
+    api_secret=CLOUD_API_SECRET,
+    secure=True,
+)
+
+CLOUD_AES = AESGCM(CLOUD_STORAGE_KEY)
+
+
+# ==================================================
+# TELEGRAM TEXT ALERTS (NO IMAGES SENT TO TELEGRAM)
+# ==================================================
+
+TELEGRAM_TOKEN_FILE = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    / "iot_fabric"
+    / "telegram_bot_token.txt"
+)
+TELEGRAM_CHAT_FILE = (
+    Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    / "iot_fabric"
+    / "telegram_chat_id.txt"
+)
+
+def _read_private_text_file(path):
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        return value if value else ""
+    except OSError:
+        return ""
+
+TELEGRAM_BOT_TOKEN = _read_private_text_file(TELEGRAM_TOKEN_FILE)
+TELEGRAM_CHAT_ID = _read_private_text_file(TELEGRAM_CHAT_FILE)
+
+TELEGRAM_ALERT_COOLDOWN_SECONDS = 60
+_TELEGRAM_ALERT_LOCK = threading.Lock()
+_TELEGRAM_LAST_SENT = {}
+
+def send_telegram_alert_async(alert_type, message):
+    """
+    Queue a plain-text Telegram alert to the one locally configured chat.
+    No image, encryption key, Cloudinary URL, or bot token is sent in chat.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        app.logger.warning(
+            "Telegram alert skipped: local bot token or chat ID file is missing."
+        )
+        return
+
+    now = time.monotonic()
+    with _TELEGRAM_ALERT_LOCK:
+        previous = _TELEGRAM_LAST_SENT.get(alert_type, 0.0)
+        if now - previous < TELEGRAM_ALERT_COOLDOWN_SECONDS:
+            app.logger.info(
+                "Telegram %s alert suppressed by cooldown.", alert_type
+            )
+            return
+        _TELEGRAM_LAST_SENT[alert_type] = now
+
+    def _send():
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not result.get("ok"):
+                raise RuntimeError("Telegram API did not confirm delivery.")
+            app.logger.info("Telegram %s text alert sent.", alert_type)
+        except Exception:
+            # Never log the request URL because it contains the bot token.
+            app.logger.exception("Telegram %s text alert failed.", alert_type)
+            with _TELEGRAM_ALERT_LOCK:
+                _TELEGRAM_LAST_SENT.pop(alert_type, None)
+
+    threading.Thread(
+        target=_send,
+        name=f"telegram-{alert_type}-alert",
+        daemon=True,
+    ).start()
+
+
+
+# ==================================================
+# COMMON JSON AND HASH-CHAIN FUNCTIONS
+# ==================================================
+
+def canonical_json(value):
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def calculate_block_hash(block):
+    contents = {
+        "index": block["index"],
+        "timestamp_utc": block["timestamp_utc"],
+        "event": block["event"],
+        "previous_hash": block["previous_hash"],
+    }
+
+    return hashlib.sha256(
+        canonical_json(contents).encode("utf-8")
+    ).hexdigest()
+
+
+def initialize_csv():
+    with CSV_LOCK:
+        if not DATA_FILE.exists() or DATA_FILE.stat().st_size == 0:
+            with DATA_FILE.open(
+                "a",
+                newline="",
+                encoding="utf-8",
+            ) as file:
+                writer = csv.DictWriter(
+                    file,
+                    fieldnames=CSV_COLUMNS,
+                )
+                writer.writeheader()
+
+
+def read_chain():
+    if not CHAIN_FILE.exists():
+        return []
+
+    blocks = []
+
+    with CHAIN_FILE.open("r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+
+            try:
+                blocks.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON at chain line {line_number}"
+                ) from exc
+
+    return blocks
+
+
+def append_block(event):
+    with CHAIN_LOCK:
+        blocks = read_chain()
+
+        previous_hash = (
+            blocks[-1]["hash"] if blocks else GENESIS_HASH
+        )
+
+        block = {
+            "index": len(blocks),
+            "timestamp_utc": event["timestamp_utc"],
+            "event": event,
+            "previous_hash": previous_hash,
+        }
+
+        block["hash"] = calculate_block_hash(block)
+
+        with CHAIN_FILE.open("a", encoding="utf-8") as file:
+            file.write(canonical_json(block) + "\n")
+
+        return block
+
+
+initialize_csv()
+
+
+# ==================================================
+# CAMERA EVENT STATUS PERSISTENCE
+# ==================================================
+
+def update_saved_camera_event(record):
+    """
+    Update the existing camera event with its final Cloudinary and
+    Fabric statuses.
+
+    A temporary file is written first and then atomically replaces
+    the event log. The event ID is used to identify the exact record.
+    """
+
+    temp_file = CAMERA_EVENTS_FILE.with_suffix(".jsonl.tmp")
+
+    try:
+        with CAMERA_LOCK:
+            if not CAMERA_EVENTS_FILE.exists():
+                raise FileNotFoundError(
+                    f"Camera event log does not exist: "
+                    f"{CAMERA_EVENTS_FILE}"
+                )
+
+            lines = CAMERA_EVENTS_FILE.read_text(
+                encoding="utf-8"
+            ).splitlines()
+
+            found = False
+
+            for index in range(len(lines) - 1, -1, -1):
+                if not lines[index].strip():
+                    continue
+
+                try:
+                    saved = json.loads(lines[index])
+                except json.JSONDecodeError:
+                    app.logger.warning(
+                        "Skipping malformed camera event log line %s",
+                        index + 1,
+                    )
+                    continue
+
+                if saved.get("event_id") == record.get("event_id"):
+                    # Preserve any fields that may have been added
+                    # to the stored record by another compatible version.
+                    saved.update(record)
+                    lines[index] = canonical_json(saved)
+                    found = True
+                    break
+
+            if not found:
+                raise RuntimeError(
+                    "Camera event ID was not found during status update: "
+                    f"{record.get('event_id')}"
+                )
+
+            temp_file.write_text(
+                "\n".join(lines) + "\n" if lines else "",
+                encoding="utf-8",
+            )
+
+            os.replace(temp_file, CAMERA_EVENTS_FILE)
+
+        app.logger.info(
+            "Saved final statuses for camera event %s: "
+            "cloud=%s, fabric=%s",
+            record.get("event_id"),
+            record.get("cloud_storage_status"),
+            record.get("fabric_status"),
+        )
+
+        return True
+
+    except Exception:
+        app.logger.exception(
+            "Failed to persist final statuses for camera event %s",
+            record.get("event_id"),
+        )
+        return False
+
+    finally:
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+        except OSError:
+            app.logger.warning(
+                "Could not remove temporary camera event file: %s",
+                temp_file,
+            )
+
+
+# ==================================================
+# ENCRYPT AND UPLOAD EVENTS TO CLOUDINARY
+# ==================================================
+
+def upload_encrypted_event_to_cloud(event):
+    """
+    Encrypt an event with the separate cloud-storage key.
+    Upload encrypted bytes and return their SHA-256 hash.
+    """
+
+    plaintext = json.dumps(
+        event,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    nonce = os.urandom(12)
+
+    ciphertext_with_tag = CLOUD_AES.encrypt(
+        nonce,
+        plaintext,
+        None,
+    )
+
+    encrypted_file = {
+        "format": "AES-256-GCM",
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "ciphertext_and_tag": base64.b64encode(
+            ciphertext_with_tag
+        ).decode("ascii"),
+    }
+
+    file_bytes = json.dumps(
+        encrypted_file,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    encrypted_file_hash = hashlib.sha256(
+        file_bytes
+    ).hexdigest()
+
+    public_id = f"event_{uuid.uuid4().hex}"
+
+    result = cloudinary.uploader.upload(
+        io.BytesIO(file_bytes),
+        resource_type="raw",
+        folder="encrypted_iot_events",
+        public_id=public_id,
+        overwrite=False,
+    )
+
+    return {
+        "public_id": result.get("public_id"),
+        "resource_type": result.get("resource_type"),
+        "encrypted_file_hash": encrypted_file_hash,
+    }
+
+
+# ==================================================
+# HYPERLEDGER FABRIC INTEGRATION
+# ==================================================
+
+def record_event_on_fabric(
+    event_id,
+    timestamp,
+    encrypted_file_hash,
+    cloud_reference,
+):
+    """
+    Send event metadata to the Fabric gateway.
+    Do not send sensor readings or encryption keys.
+    """
+
+    if not FABRIC_GATEWAY_TOKEN:
+        raise RuntimeError(
+            "FABRIC_GATEWAY_TOKEN is not configured."
+        )
+
+    if (
+        not encrypted_file_hash
+        or len(encrypted_file_hash) != 64
+    ):
+        raise ValueError(
+            "Invalid encrypted file SHA-256 hash."
+        )
+
+    payload = {
+        "eventId": event_id,
+        "timestamp": timestamp,
+        "encryptedFileHash": encrypted_file_hash,
+        "cloudReference": cloud_reference,
+    }
+
+    response = requests.post(
+        FABRIC_GATEWAY_URL,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {FABRIC_GATEWAY_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        timeout=15,
+    )
+
+    response.raise_for_status()
+
+    # Some gateways return an empty response body on success.
+    if not response.content:
+        return {"status": "success"}
+
+    try:
+        return response.json()
+    except ValueError:
+        return {
+            "status": "success",
+            "response_text": response.text[:500],
+        }
+
+
+# ==================================================
+# AUTHENTICATION
+# ==================================================
+
+LOGIN_PAGE = """
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IoT Dashboard Login</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f1f5f9;
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+        }
+        .card {
+            box-sizing: border-box;
+            background: white;
+            padding: 32px;
+            border-radius: 12px;
+            width: min(360px, calc(100% - 32px));
+            box-shadow: 0 8px 28px #0001;
+        }
+        h1 { font-size: 24px; }
+        label { display: block; margin-top: 18px; }
+        input {
+            box-sizing: border-box;
+            width: 100%;
+            padding: 12px;
+            margin-top: 8px;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            margin-top: 20px;
+            background: #0f766e;
+            color: white;
+            border: 0;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .error { color: #b91c1c; }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Secure IoT Dashboard</h1>
+        <p>Sign in to view protected sensor events.</p>
+
+        {% if error %}
+        <p class="error" role="alert">{{ error }}</p>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('login') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <label for="password">Dashboard password</label>
+            <input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+                minlength="12"
+            >
+
+            <button type="submit">Sign in</button>
+        </form>
+    </main>
+</body>
+</html>
+"""
+
+
+def dashboard_login_required(view_function):
+    @wraps(view_function)
+    def wrapped_view(*args, **kwargs):
+        if not session.get("dashboard_authenticated"):
+            if request.path.startswith("/api/"):
+                return jsonify({
+                    "error": "Authentication required"
+                }), 401
+
+            return redirect(url_for("login"))
+
+        return view_function(*args, **kwargs)
+
+    return wrapped_view
+
+
+@app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute", methods=["POST"])
+def login():
+    if session.get("dashboard_authenticated"):
+        return redirect(url_for("home"))
+
+    error = None
+
+    if request.method == "POST":
+        password = request.form.get("password", "")
+
+        if check_password_hash(
+            DASHBOARD_PASSWORD_HASH,
+            password,
+        ):
+            session.clear()
+            session["dashboard_authenticated"] = True
+            session.permanent = True
+
+            return redirect(url_for("home"))
+
+        error = "Invalid password. Please try again."
+
+    return render_template_string(
+        LOGIN_PAGE,
+        error=error,
+    )
+
+
+@app.post("/logout")
+@dashboard_login_required
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.get("/api/dashboard-info")
+@dashboard_login_required
+def dashboard_info():
+    from flask_wtf.csrf import generate_csrf
+
+    return jsonify({
+        "csrf_token": generate_csrf()
+    })
+
+
+# ==================================================
+# DASHBOARD
+# ==================================================
+
+@app.get("/")
+@dashboard_login_required
+def home():
+    return r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure IoT | Monitoring Console</title>
+
+<style>
+:root {
+    color-scheme: dark;
+    --bg: #08111f;
+    --panel: #111e30;
+    --panel2: #16263b;
+    --border: #263b53;
+    --text: #edf5ff;
+    --muted: #9bb0c8;
+    --cyan: #52d6d0;
+    --blue: #70a7ff;
+    --green: #48d597;
+    --red: #ff727f;
+    --amber: #f4c76b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 20px clamp(16px, 4vw, 48px);
+    border-bottom: 1px solid var(--border);
+    background: #0b1727;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    background: #123a43;
+    color: var(--cyan);
+    font-size: 23px;
+}
+
+h1 { margin: 0; font-size: clamp(20px, 3vw, 27px); }
+.subtitle { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+
+button {
+    min-height: 42px;
+    padding: 10px 15px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--panel2);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+button:hover { border-color: var(--cyan); }
+button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+button.primary { background: #12434a; border-color: #237b7b; }
+button:disabled { opacity: .55; cursor: wait; }
+
+main {
+    max-width: 1450px;
+    margin: auto;
+    padding: 28px clamp(16px, 4vw, 48px);
+}
+
+.eyebrow {
+    color: var(--cyan);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.intro {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    align-items: end;
+    flex-wrap: wrap;
+}
+
+.intro h2 { font-size: clamp(24px, 4vw, 34px); margin: 5px 0; }
+.muted { color: var(--muted); }
+
+.statusline {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--amber);
+    display: inline-block;
+}
+
+.dot.good { background: var(--green); }
+.dot.bad { background: var(--red); }
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin: 25px 0;
+}
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 15px;
+    padding: 19px;
+    min-width: 0;
+}
+
+.cardtop {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.card h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.icon { font-size: 21px; }
+
+.value {
+    margin: 18px 0 4px;
+    font-size: 22px;
+    font-weight: 750;
+    overflow-wrap: anywhere;
+}
+
+.small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+.badge {
+    display: inline-block;
+    border-radius: 20px;
+    padding: 4px 8px;
+    background: #28364a;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.badge.good { background: #12382e; color: var(--green); }
+.badge.bad { background: #421e2b; color: var(--red); }
+.badge.warn { background: #42351c; color: var(--amber); }
+
+.layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
+    gap: 16px;
+}
+
+.sectionhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 15px;
+}
+
+.sectionhead h2 { margin: 0; font-size: 17px; }
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.preview {
+    display: grid;
+    place-items: center;
+    min-height: 220px;
+    padding: 20px;
+    border: 1px dashed #36516d;
+    border-radius: 12px;
+    text-align: center;
+    background: radial-gradient(ellipse at center, #162c43, #0c1726);
+}
+
+.preview .cameraicon { font-size: 38px; }
+.preview a { color: var(--cyan); }
+
+.pipeline { display: grid; gap: 10px; }
+
+.stage {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 13px;
+    border-radius: 10px;
+    background: #0c1828;
+    border: 1px solid var(--border);
+}
+
+.stageicon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: var(--panel2);
+}
+
+.stage strong { display: block; font-size: 13px; }
+.stage p { margin: 3px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+
+.tablewrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 12px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; }
+td { overflow-wrap: anywhere; }
+.empty { padding: 25px 10px; text-align: center; color: var(--muted); }
+.footer { margin-top: 20px; color: var(--muted); font-size: 12px; }
+
+@media(max-width: 950px) {
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .layout { grid-template-columns: 1fr; }
+}
+
+@media(max-width: 480px) {
+    header { align-items: flex-start; }
+    .grid { gap: 9px; }
+    .card { padding: 13px; }
+    .value { font-size: 18px; }
+}
+</style>
+</head>
+
+<body>
+<header>
+    <div class="brand">
+        <div class="logo" aria-hidden="true">⬡</div>
+        <div>
+            <h1>Secure IoT</h1>
+            <p class="subtitle">Privacy-preserving edge intelligence</p>
+        </div>
+    </div>
+
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <a href="/vault" style="color:#52d6d0;text-decoration:none;border:1px solid #52d6d0;border-radius:10px;padding:9px 14px;font-size:14px">🔐 Authorised area</a>
+    <a href="/pipeline" style="color:#52d6d0;text-decoration:none;border:1px solid #52d6d0;border-radius:10px;padding:9px 14px;font-size:14px">&#9889; Command center</a>
+    <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" id="logoutCsrf">
+        <button type="submit">Sign out ↗</button>
+    </form>
+    </div>
+</header>
+
+<main>
+    <section class="intro">
+        <div>
+            <div class="eyebrow">Security operations / Overview</div>
+            <h2>Monitoring console</h2>
+            <p class="muted">
+                TinyML detection · AES-256-GCM · Encrypted cloud · Blockchain metadata
+            </p>
+        </div>
+
+        <div>
+            <div class="statusline">
+                <span class="dot good"></span>
+                <span>Dashboard authenticated</span>
+            </div>
+            <div class="small" id="lastRefresh">Loading system data…</div>
+        </div>
+    </section>
+
+    <section class="grid" aria-label="System overview">
+        <article class="card">
+            <div class="cardtop">
+                <h3>Flask backend</h3>
+                <span class="icon">⌘</span>
+            </div>
+            <div class="value" id="flaskValue">Checking…</div>
+            <span class="badge" id="flaskBadge">Checking</span>
+            <p class="small">Current dashboard session</p>
+        </article>
+
+        <article class="card">
+            <div class="cardtop">
+                <h3>Camera events</h3>
+                <span class="icon">◉</span>
+            </div>
+            <div class="value" id="cameraCount">—</div>
+            <span class="badge" id="cameraBadge">Waiting for data</span>
+            <p class="small">Saved anomaly records</p>
+        </article>
+
+        <article class="card">
+            <div class="cardtop">
+                <h3>Sensor events</h3>
+                <span class="icon">⌁</span>
+            </div>
+            <div class="value" id="sensorCount">—</div>
+            <span class="badge" id="sensorBadge">Waiting for data</span>
+            <p class="small">Humidity anomaly records</p>
+        </article>
+
+        <article class="card">
+            <div class="cardtop">
+                <h3>Local integrity</h3>
+                <span class="icon">⛨</span>
+            </div>
+            <div class="value" id="chainValue">Checking…</div>
+            <span class="badge" id="chainBadge">Checking</span>
+            <p class="small" id="chainDetail">Verifying hash links</p>
+        </article>
+    </section>
+
+    <section class="layout">
+        <article class="card">
+            <div class="sectionhead">
+                <h2>Camera monitoring</h2>
+                <span class="badge" id="cameraConnection">Not checked</span>
+            </div>
+
+            <div class="preview">
+                <div>
+                    <div class="cameraicon">📷</div>
+                    <h3>ESP32-CAM preview</h3>
+                    <p class="muted" id="previewMessage">
+                        Enter your camera's Wi-Fi IP address to open its preview.
+                    </p>
+
+                    <div class="actions" style="justify-content:center">
+                        <input
+                            id="cameraUrl"
+                            type="url"
+                            placeholder="http://192.168.1.50"
+                            aria-label="Camera base URL"
+                            style="max-width:230px;min-width:0;padding:10px;border-radius:8px;border:1px solid var(--border);background:#08111f;color:var(--text)"
+                        >
+                        <button class="primary" id="openCamera" type="button">
+                            Open preview
+                        </button>
+                    </div>
+
+                    <p class="small">
+                        Preview is opened separately. This does not start or stop inference on the camera.
+                    </p>
+                </div>
+            </div>
+
+            <div class="sectionhead" style="margin-top:22px">
+                <h2>Event activity</h2>
+                <button id="refreshBtn" type="button">↻ Refresh data</button>
+            </div>
+
+            <div class="tablewrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Device</th>
+                            <th>Event</th>
+                            <th>Result</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="eventsBody">
+                        <tr>
+                            <td colspan="5" class="empty">Loading event records…</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </article>
+
+        <article class="card">
+            <div class="sectionhead">
+                <h2>Security pipeline</h2>
+                <span class="badge">Latest saved statuses</span>
+            </div>
+
+            <p class="muted" style="font-size:13px">
+                These indicators show checks the backend has actually completed.
+            </p>
+
+            <div class="pipeline">
+                <div class="stage">
+                    <div class="stageicon">🔐</div>
+                    <div>
+                        <strong>Payload authentication</strong>
+                        <p>ESP32 encrypted payloads are authenticated and decrypted by the server before acceptance.</p>
+                        <span class="badge" id="cryptoBadge">Ready to validate next event</span>
+                    </div>
+                </div>
+
+                <div class="stage">
+                    <div class="stageicon">💾</div>
+                    <div>
+                        <strong>Local event storage</strong>
+                        <p id="localDetail">Reading saved records</p>
+                        <span class="badge" id="localBadge">Checking</span>
+                    </div>
+                </div>
+
+                <div class="stage">
+                    <div class="stageicon">☁️</div>
+                    <div>
+                        <strong>Encrypted cloud storage</strong>
+                        <p id="cloudDetail">Latest saved Cloudinary result</p>
+                        <span class="badge" id="cloudBadge">No event status yet</span>
+                    </div>
+                </div>
+
+                <div class="stage">
+                    <div class="stageicon">⛓️</div>
+                    <div>
+                        <strong>Hyperledger Fabric</strong>
+                        <p id="fabricDetail">Latest saved Fabric result</p>
+                        <span class="badge" id="fabricBadge">No event status yet</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="footer">
+                Cloud and Fabric badges reflect the latest saved camera-event statuses.
+                They are not continuous external health probes.
+            </div>
+        </article>
+    </section>
+
+    <p class="footer">
+        Security note: this dashboard does not display encryption keys.
+        Cloud encryption and Fabric metadata verification are handled by the backend workflow.
+    </p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function badge(id, text, state = "") {
+    const el = $(id);
+    el.textContent = text;
+    el.className = "badge" + (state ? " " + state : "");
+}
+
+function dateText(value) {
+    if (!value) return "—";
+
+    const d = new Date(value);
+
+    return Number.isNaN(d.getTime())
+        ? String(value)
+        : d.toLocaleString();
+}
+
+function setRows(records) {
+    const body = $("eventsBody");
+    body.replaceChildren();
+
+    if (!records.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 5;
+        td.className = "empty";
+        td.textContent = "No sensor records or camera events found yet.";
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+    }
+
+    records.slice(0, 20).forEach(r => {
+        const tr = document.createElement("tr");
+
+        [
+            dateText(r.timestamp_utc),
+            r.device_id || "—",
+            r.prediction || r.event_type || "Event",
+            r.status || r.prediction || r.fabric_status || "Recorded"
+        ].forEach(value => {
+            const td = document.createElement("td");
+            td.textContent = value;
+            tr.appendChild(td);
+        });
+
+        const actionCell = document.createElement("td");
+
+        actionCell.textContent = "—";
+
+        tr.appendChild(actionCell);
+        body.appendChild(tr);
+    });
+}
+async function getJSON(url) {
+    const response = await fetch(url, {
+        credentials: "same-origin",
+        cache: "no-store"
+    });
+
+    if (response.status === 401) {
+        location.href = "/login";
+        throw new Error("Please sign in again.");
+    }
+
+    if (!response.ok) {
+        throw new Error("Request failed: " + response.status);
+    }
+
+    return response.json();
+}
+
+function updateServiceBadge(service, events) {
+    const statusKey = service === "cloud"
+        ? "cloud_storage_status"
+        : "fabric_status";
+
+    const badgeId = service === "cloud"
+        ? "cloudBadge"
+        : "fabricBadge";
+
+    const detailId = service === "cloud"
+        ? "cloudDetail"
+        : "fabricDetail";
+
+    // Find the latest event that has a status for this particular service.
+    const latest = events.find(event =>
+        typeof event[statusKey] === "string" &&
+        event[statusKey].length > 0
+    );
+
+    if (!latest) {
+        badge(
+            badgeId,
+            events.length ? "No saved status" : "No camera events"
+        );
+
+        $(detailId).textContent = events.length
+            ? "No status has been saved for this service yet."
+            : "Waiting for the first camera event.";
+
+        return;
+    }
+
+    const status = latest[statusKey];
+    const isCloud = service === "cloud";
+
+    let label = status;
+    let state = "";
+
+    if (status === "uploaded" || status === "recorded") {
+        label = isCloud
+            ? "Uploaded successfully"
+            : "Recorded successfully";
+
+        state = "good";
+    } else if (status === "failed") {
+        label = isCloud
+            ? "Upload failed"
+            : "Recording failed";
+
+        state = "bad";
+    } else if (status === "skipped") {
+        label = isCloud
+            ? "Upload skipped"
+            : "Recording skipped";
+
+        state = "warn";
+    }
+
+    badge(badgeId, label, state);
+
+    const reference = isCloud
+        ? latest.cloud_public_id
+        : latest.fabric_event_id;
+
+    $(detailId).textContent =
+        "Event " + (latest.event_id || "unknown") +
+        " · " + dateText(latest.timestamp_utc) +
+        (reference ? " · Reference: " + reference : "");
+}
+
+function pulseRowsFrom(result) {
+    if (!result || result.status !== "fulfilled") return [];
+    const events = Array.isArray(result.value.events) ? result.value.events : [];
+    return events.map(event => ({
+        ...event,
+        status: event.fabric_status || "Recorded"
+    }));
+}
+
+async function refreshDashboard() {
+    $("refreshBtn").disabled = true;
+    $("flaskValue").textContent = "Checking…";
+
+   let sensorRecords = [];
+   let cameraRecords = [];
+   let imageRecords =[];
+
+    try {
+        const [sensorResult, cameraResult, imageResult, pulseResult] = await Promise.allSettled([
+    getJSON("/api/latest?count=20"),
+    getJSON("/api/camera-events"),
+    getJSON("/api/image-events"),
+    getJSON("/api/pulse-events")
+]);
+
+        // ------------------------------------------
+        // SENSOR RECORDS
+        // ------------------------------------------
+
+        if (sensorResult.status === "fulfilled") {
+            const data = sensorResult.value;
+
+            sensorRecords = Array.isArray(data.events)
+                ? data.events
+                : [];
+
+            $("flaskValue").textContent = "Online";
+            badge("flaskBadge", "Responding", "good");
+
+            $("sensorCount").textContent =
+                String(data.count ?? sensorRecords.length);
+
+            badge(
+                "sensorBadge",
+                sensorRecords.length ? "Records loaded" : "No records yet",
+                sensorRecords.length ? "good" : ""
+            );
+        } else {
+            $("sensorCount").textContent = "—";
+            badge("sensorBadge", "Request failed", "bad");
+        }
+
+        // ------------------------------------------
+        // CAMERA RECORDS
+        // ------------------------------------------
+
+        if (cameraResult.status === "fulfilled") {
+            const data = cameraResult.value;
+
+            cameraRecords = Array.isArray(data.events)
+                ? data.events
+                : [];
+
+            $("cameraCount").textContent =
+                String(data.count ?? cameraRecords.length);
+
+            badge(
+                "cameraBadge",
+                cameraRecords.length ? "Events available" : "No camera events",
+                cameraRecords.length ? "good" : ""
+            );
+
+            updateServiceBadge("cloud", cameraRecords);
+            updateServiceBadge("fabric", cameraRecords);
+        } else {
+            $("cameraCount").textContent = "—";
+
+            badge("cameraBadge", "Camera events unavailable", "bad");
+            badge("cloudBadge", "Camera events unavailable", "bad");
+            badge("fabricBadge", "Camera events unavailable", "bad");
+
+            $("cloudDetail").textContent = "Could not load camera event history.";
+            $("fabricDetail").textContent = "Could not load camera event history.";
+        }
+// ------------------------------------------
+// IMAGE RECORDS
+// ------------------------------------------
+
+if (imageResult.status === "fulfilled") {
+    const data = imageResult.value;
+
+    imageRecords = Array.isArray(data.events)
+        ? data.events.map(event => ({
+            ...event,
+            device_id: "ESP32-CAM",
+            event_type: "Encrypted image",
+            status: event.fabric_status || "Recorded"
+        }))
+        : [];
+}
+        // ------------------------------------------
+        // COMBINE AND SORT ACTIVITY
+        // ------------------------------------------
+
+        const records = [
+    ...sensorRecords,
+    ...cameraRecords,
+    ...imageRecords,
+    ...pulseRowsFrom(pulseResult)
+].sort((a, b) => {
+    const timeA = new Date(a.timestamp_utc || 0).getTime();
+    const timeB = new Date(b.timestamp_utc || 0).getTime();
+
+    return timeB - timeA;
+});
+
+        setRows(records);
+
+        $("localDetail").textContent =
+            sensorRecords.length + " sensor record(s), " +
+            cameraRecords.length + " camera event(s) loaded from Flask.";
+
+        const anyRequestSucceeded =
+            sensorResult.status === "fulfilled" ||
+            cameraResult.status === "fulfilled";
+
+        badge(
+            "localBadge",
+            anyRequestSucceeded ? "Readable" : "Read failed",
+            anyRequestSucceeded ? "good" : "bad"
+        );
+
+        if (sensorResult.status === "rejected" &&
+            cameraResult.status === "rejected") {
+            $("flaskValue").textContent = "Unavailable";
+            badge("flaskBadge", "Requests failed", "bad");
+        }
+
+        $("lastRefresh").textContent =
+            "Updated " + new Date().toLocaleTimeString();
+
+    } catch (error) {
+        console.error("Dashboard refresh failed:", error);
+
+        $("flaskValue").textContent = "Unavailable";
+        badge("flaskBadge", "Request failed", "bad");
+        $("localDetail").textContent = error.message;
+
+    } finally {
+        $("refreshBtn").disabled = false;
+    }
+
+    // ----------------------------------------------
+    // VERIFY LOCAL HASH CHAIN
+    // ----------------------------------------------
+
+    try {
+        const chain = await getJSON("/api/verify-chain");
+
+        if (chain.valid) {
+            $("chainValue").textContent = "Valid";
+            badge("chainBadge", "Verified", "good");
+
+            $("chainDetail").textContent =
+                (chain.block_count ?? 0) + " block(s) checked";
+        } else {
+            $("chainValue").textContent = "Warning";
+            badge("chainBadge", "Integrity issue", "bad");
+
+            $("chainDetail").textContent =
+                chain.error || "A hash-chain check failed.";
+        }
+    } catch (error) {
+        $("chainValue").textContent = "Unavailable";
+        badge("chainBadge", "Check failed", "bad");
+        $("chainDetail").textContent = error.message;
+    }
+}
+
+$("refreshBtn").addEventListener("click", refreshDashboard);
+
+// ----------------------------------------------
+// OPEN ESP32-CAM PREVIEW
+// ----------------------------------------------
+
+$("openCamera").addEventListener("click", () => {
+    const value = $("cameraUrl").value.trim().replace(/\/+$/, "");
+
+    if (!value) {
+        $("previewMessage").textContent =
+            "Enter the ESP32-CAM base URL first.";
+
+        $("cameraConnection").textContent = "URL required";
+        return;
+    }
+
+    try {
+        const url = new URL(value);
+
+        if (!["http:", "https:"].includes(url.protocol)) {
+            throw new Error("Invalid protocol");
+        }
+
+        if (url.username || url.password) {
+            throw new Error("Credentials in URL are not allowed");
+        }
+
+        $("cameraConnection").textContent = "Opening preview";
+
+        window.open(
+            url.href,
+            "_blank",
+            "noopener,noreferrer"
+        );
+
+        $("previewMessage").textContent =
+            "Camera preview opened in another tab. Check that tab for the actual camera image.";
+
+    } catch {
+        $("previewMessage").textContent =
+            "Enter a valid camera address, such as http://192.168.1.50.";
+
+        $("cameraConnection").textContent = "Invalid URL";
+    }
+});
+
+// ----------------------------------------------
+// CSRF TOKEN FOR SIGN-OUT FORM
+// ----------------------------------------------
+
+(async () => {
+    try {
+        const data = await getJSON("/api/dashboard-info");
+        $("logoutCsrf").value = data.csrf_token;
+    } catch (error) {
+        console.error("Could not retrieve sign-out CSRF token.");
+    }
+})();
+
+// Initial load and periodic refresh
+refreshDashboard();
+setInterval(refreshDashboard, 15000);
+</script>
+</body>
+</html>
+"""
+
+
+# ==================================================
+# RECEIVE, VERIFY AND STORE SENSOR EVENTS
+# ==================================================
+
+@app.post("/api/sensor")
+@csrf.exempt
+def receive_sensor_data():
+    envelope = request.get_json(silent=True)
+
+    if not isinstance(envelope, dict):
+        return jsonify({
+            "error": "Expected a JSON object"
+        }), 400
+
+    required = [
+        "device_id",
+        "nonce",
+        "ciphertext",
+        "tag",
+    ]
+
+    missing = [
+        field for field in required
+        if field not in envelope
+    ]
+
+    if missing:
+        return jsonify({
+            "error": "Encrypted envelope is incomplete",
+            "missing": missing,
+        }), 400
+
+    device_id = envelope["device_id"]
+
+    if (
+        not isinstance(device_id, str)
+        or not device_id
+        or len(device_id) > 64
+    ):
+        return jsonify({
+            "error": "Invalid device_id"
+        }), 400
+
+    # ----------------------------------------------
+    # DECRYPT AND AUTHENTICATE
+    # ----------------------------------------------
+
+    try:
+        nonce = base64.b64decode(
+            envelope["nonce"],
+            validate=True,
+        )
+
+        ciphertext = base64.b64decode(
+            envelope["ciphertext"],
+            validate=True,
+        )
+
+        tag = base64.b64decode(
+            envelope["tag"],
+            validate=True,
+        )
+
+        if len(nonce) != 12:
+            return jsonify({
+                "error": "Nonce must be 12 bytes"
+            }), 400
+
+        if len(tag) != 16:
+            return jsonify({
+                "error": "Authentication tag must be 16 bytes"
+            }), 400
+
+        plaintext = AES.decrypt(
+            nonce,
+            ciphertext + tag,
+            device_id.encode("utf-8"),
+        )
+
+        data = json.loads(plaintext.decode("utf-8"))
+
+    except Exception:
+        return jsonify({
+            "error": "Encrypted event verification or decryption failed"
+        }), 400
+
+    # ----------------------------------------------
+    # VALIDATE DECRYPTED DATA
+    # ----------------------------------------------
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Decrypted payload must be a JSON object"
+        }), 400
+
+    if data.get("device_id") != device_id:
+        return jsonify({
+            "error": "Device ID mismatch"
+        }), 400
+
+    if data.get("prediction") not in ("NORMAL", "HIGH_HUMIDITY"):
+        return jsonify({
+            "error": "Invalid prediction"
+        }), 400
+
+    try:
+        temperature = float(data["temperature"])
+        humidity = float(data["humidity"])
+
+        if (
+            not math.isfinite(temperature)
+            or not -40 <= temperature <= 80
+        ):
+            raise ValueError(
+                "Temperature is outside the accepted range"
+            )
+
+        if (
+            not math.isfinite(humidity)
+            or not 0 <= humidity <= 100
+        ):
+            raise ValueError(
+                "Humidity is outside the accepted range"
+            )
+
+    except (KeyError, TypeError, ValueError) as exc:
+        return jsonify({
+            "error": str(exc)
+        }), 400
+
+    # ----------------------------------------------
+    # CREATE EVENT
+    # ----------------------------------------------
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    record = {
+        "timestamp_utc": timestamp,
+        "device_id": device_id,
+        "temperature_c": temperature,
+                "humidity_percent": humidity,
+        "prediction": data["prediction"]
+    }
+
+    # ----------------------------------------------
+    # SAVE CSV AND HASH-CHAIN BLOCK
+    # ----------------------------------------------
+
+    try:
+        # Use one consistent lock order: CSV_LOCK, then CHAIN_LOCK.
+        with CSV_LOCK:
+            with DATA_FILE.open(
+                "a",
+                newline="",
+                encoding="utf-8",
+            ) as file:
+                csv.DictWriter(
+                    file,
+                    fieldnames=CSV_COLUMNS,
+                ).writerow(record)
+
+            block = append_block(record)
+
+    except Exception:
+        app.logger.exception(
+            "Failed to store sensor event or append hash-chain block"
+        )
+
+        return jsonify({
+            "error": (
+                "Local storage or hash-chain operation failed. "
+                "Check the server files before retrying."
+            )
+        }), 500
+
+    app.logger.info(
+        "Verified encrypted anomaly from %s; hash-chain block %s added.",
+        device_id,
+        block["index"],
+    )
+
+    # ----------------------------------------------
+    # CLOUDINARY AND FABRIC
+    # ----------------------------------------------
+
+    # Normal readings are saved locally but do not generate cloud uploads.
+    cloud_status = "skipped"
+    cloud_public_id = None
+    fabric_status = "skipped"
+    fabric_result = None
+    fabric_event_id = None
+
+    if data["prediction"] == "HIGH_HUMIDITY":
+        try:
+            cloud_result = upload_encrypted_event_to_cloud(record)
+
+            cloud_public_id = cloud_result.get("public_id")
+            encrypted_file_hash = cloud_result.get("encrypted_file_hash")
+
+            if not cloud_public_id or not encrypted_file_hash:
+                raise RuntimeError(
+                    "Cloud upload result is missing public_id or file hash."
+                )
+
+            cloud_status = "uploaded"
+
+            app.logger.info(
+                "Encrypted sensor event uploaded to Cloudinary: %s",
+                cloud_public_id,
+            )
+
+            fabric_event_id = cloud_public_id.rsplit("/", 1)[-1]
+
+            try:
+                fabric_result = record_event_on_fabric(
+                    event_id=fabric_event_id,
+                    timestamp=timestamp,
+                    encrypted_file_hash=encrypted_file_hash,
+                    cloud_reference=cloud_public_id,
+                )
+
+                fabric_status = "recorded"
+
+                app.logger.info(
+                    "Sensor event metadata recorded on Fabric: %s",
+                    fabric_event_id,
+                )
+
+            except Exception:
+                fabric_status = "failed"
+
+                app.logger.exception(
+                    "Fabric recording failed. The event remains stored "
+                    "locally and in Cloudinary."
+                )
+
+        except Exception:
+            cloud_status = "failed"
+            fabric_status = "skipped"
+
+            app.logger.exception(
+                "Cloudinary upload failed. The event remains stored locally."
+            )
+
+        send_telegram_alert_async(
+            "high_humidity",
+            (
+                "⚠️ HIGH HUMIDITY ALERT\n"
+                f"Device: {device_id}\n"
+                f"Humidity: {humidity:.1f}% (threshold: >70%)\n"
+                f"Temperature: {temperature:.1f} °C\n"
+                f"Time (UTC): {timestamp}\n"
+                "Open the authenticated IoT dashboard to review the event."
+            ),
+        )
+
+    return jsonify({
+        "status": "success",
+        "message": "Encrypted anomaly verified and saved locally",
+        "device_id": device_id,
+        "prediction": data["prediction"],
+        "timestamp_utc": timestamp,
+        "block_index": block["index"],
+        "block_hash": block["hash"],
+        "cloud_storage_status": cloud_status,
+        "cloud_public_id": cloud_public_id,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+        "fabric_event": fabric_result,
+    }), 201
+
+
+# ==================================================
+# RECEIVE ENCRYPTED ESP32-CAM EVENTS
+# ==================================================
+
+@app.post("/api/camera-event")
+@csrf.exempt
+@limiter.limit("30 per minute")
+def receive_camera_event():
+    envelope = request.get_json(silent=True)
+
+    if not isinstance(envelope, dict):
+        return jsonify({
+            "error": "Expected a JSON object"
+        }), 400
+
+    required = [
+        "device_id",
+        "nonce",
+        "ciphertext",
+        "tag",
+    ]
+
+    if any(field not in envelope for field in required):
+        return jsonify({
+            "error": "Incomplete encrypted camera event",
+            "required_fields": required,
+        }), 400
+
+    device_id = envelope.get("device_id")
+
+    if device_id != "ESP32-CAM":
+        return jsonify({
+            "error": "Invalid camera device ID"
+        }), 400
+
+    # ----------------------------------------------
+    # DECRYPT AND AUTHENTICATE
+    # ----------------------------------------------
+
+    try:
+        nonce = base64.b64decode(
+            envelope["nonce"],
+            validate=True,
+        )
+
+        ciphertext = base64.b64decode(
+            envelope["ciphertext"],
+            validate=True,
+        )
+
+        tag = base64.b64decode(
+            envelope["tag"],
+            validate=True,
+        )
+
+        if len(nonce) != 12 or len(tag) != 16:
+            return jsonify({
+                "error": "Invalid nonce or authentication tag length"
+            }), 400
+
+        plaintext = CAMERA_AES.decrypt(
+            nonce,
+            ciphertext + tag,
+            device_id.encode("utf-8"),
+        )
+
+        event = json.loads(plaintext.decode("utf-8"))
+
+    except Exception:
+        return jsonify({
+            "error": "Camera event authentication or decryption failed"
+        }), 400
+
+    # ----------------------------------------------
+    # VALIDATE CAMERA EVENT
+    # ----------------------------------------------
+
+    if not isinstance(event, dict):
+        return jsonify({
+            "error": "Event must be a JSON object"
+        }), 400
+
+    if (
+        event.get("source") != "ESP32-CAM"
+        or event.get("event_type") != "INTRUSION"
+        or event.get("detection") != "TINYML_PERSON_CLASSIFIER"
+        or event.get("status") != "ANOMALY"
+        or event.get("security_mode") != "ARMED"
+    ):
+        return jsonify({
+            "error": "Invalid camera event fields"
+        }), 400
+
+    try:
+        confidence = float(event["person_confidence"])
+        motion_score = float(event["motion_score"])
+
+        if (
+            not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise ValueError()
+
+        if (
+            not math.isfinite(motion_score)
+            or not 0 <= motion_score <= 100
+        ):
+            raise ValueError()
+
+    except (KeyError, TypeError, ValueError):
+        return jsonify({
+            "error": "Invalid confidence or motion score"
+        }), 400
+
+    # ----------------------------------------------
+    # CREATE CAMERA EVENT RECORD
+    # ----------------------------------------------
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    record = {
+        "event_id": f"cam_{uuid.uuid4().hex}",
+        "timestamp_utc": timestamp,
+        "device_id": device_id,
+        "event_type": "INTRUSION",
+        "detection": "TINYML_PERSON_CLASSIFIER",
+        "security_mode": "ARMED",
+        "context": str(event.get("context", "UNKNOWN"))[:80],
+        "person_confidence": confidence,
+        "motion_score": motion_score,
+        "status": "ANOMALY",
+
+        # Initialise these fields so every new event has a consistent schema.
+        "cloud_storage_status": "pending",
+        "cloud_public_id": None,
+        "fabric_status": "pending",
+        "fabric_event_id": None,
+    }
+
+    # ----------------------------------------------
+    # SAVE INITIAL EVENT LOCALLY
+    # ----------------------------------------------
+
+    try:
+        with CAMERA_LOCK:
+            with CAMERA_EVENTS_FILE.open(
+                "a",
+                encoding="utf-8",
+            ) as file:
+                file.write(canonical_json(record) + "\n")
+
+    except OSError:
+        app.logger.exception("Failed to save camera event")
+
+        return jsonify({
+            "error": "Could not save camera event"
+        }), 500
+
+    # ----------------------------------------------
+    # UPLOAD TO CLOUDINARY AND RECORD ON FABRIC
+    # ----------------------------------------------
+
+    cloud_status = "failed"
+    fabric_status = "skipped"
+    cloud_public_id = None
+    fabric_event_id = None
+    fabric_result = None
+
+    try:
+        cloud_result = upload_encrypted_event_to_cloud(record)
+
+        cloud_public_id = cloud_result.get("public_id")
+        encrypted_hash = cloud_result.get("encrypted_file_hash")
+
+        if not cloud_public_id or not encrypted_hash:
+            raise RuntimeError(
+                "Cloud upload returned incomplete metadata"
+            )
+
+        cloud_status = "uploaded"
+
+        app.logger.info(
+            "Encrypted camera event uploaded to Cloudinary: %s",
+            cloud_public_id,
+        )
+
+        fabric_event_id = cloud_public_id.rsplit("/", 1)[-1]
+
+        try:
+            fabric_result = record_event_on_fabric(
+                event_id=fabric_event_id,
+                timestamp=timestamp,
+                encrypted_file_hash=encrypted_hash,
+                cloud_reference=cloud_public_id,
+            )
+
+            fabric_status = "recorded"
+
+            app.logger.info(
+                "Camera event metadata recorded on Fabric: %s",
+                fabric_event_id,
+            )
+
+        except Exception:
+            fabric_status = "failed"
+
+            app.logger.exception(
+                "Failed to record camera metadata on Fabric"
+            )
+
+    except Exception:
+        cloud_status = "failed"
+        fabric_status = "skipped"
+
+        app.logger.exception(
+            "Failed to upload camera event to Cloudinary"
+        )
+
+    # ----------------------------------------------
+    # SAVE FINAL CLOUD AND FABRIC STATUSES
+    # ----------------------------------------------
+
+    record["cloud_storage_status"] = cloud_status
+    record["cloud_public_id"] = cloud_public_id
+    record["fabric_status"] = fabric_status
+    record["fabric_event_id"] = fabric_event_id
+
+    status_saved = update_saved_camera_event(record)
+
+    send_telegram_alert_async(
+        "camera_intrusion",
+        (
+            "🚨 INTRUSION DETECTED\n"
+            "Device: ESP32-CAM\n"
+            f"Event ID: {record['event_id']}\n"
+            f"Person confidence: {confidence:.1%}\n"
+            f"Motion score: {motion_score:.1f}\n"
+            f"Time (UTC): {timestamp}\n"
+            f"Cloudinary: {cloud_status} | Fabric: {fabric_status}\n"
+            "No image is sent in Telegram. Sign in to the IoT dashboard "
+            "to verify, decrypt and view the captured image."
+        ),
+    )
+
+    return jsonify({
+        "status": "success",
+        "message": "Encrypted camera event authenticated and stored locally",
+        "event_id": record["event_id"],
+        "timestamp_utc": timestamp,
+        "cloud_storage_status": cloud_status,
+        "cloud_public_id": cloud_public_id,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+        "status_persisted": status_saved,
+        "fabric_event": fabric_result,
+    }), 201
+
+
+# ==================================================
+# GET LATEST LOCAL SENSOR RECORDS
+# ==================================================
+
+@app.get("/api/latest")
+@dashboard_login_required
+def latest_sensor_events():
+    """Return recent sensor records to the authenticated dashboard."""
+
+    try:
+        count = request.args.get("count", default=20, type=int)
+        count = max(1, min(count or 20, 100))
+
+        if not DATA_FILE.exists():
+            return jsonify({
+                "events": [],
+                "count": 0,
+            })
+
+        with CSV_LOCK:
+            with DATA_FILE.open(
+                "r",
+                newline="",
+                encoding="utf-8",
+            ) as file:
+                reader = csv.DictReader(file)
+                rows = list(reader)
+
+        rows = rows[-count:]
+        rows.reverse()
+
+        return jsonify({
+            "events": rows,
+            "count": len(rows),
+        })
+
+    except (OSError, csv.Error):
+        app.logger.exception(
+            "Unable to read sensor event history."
+        )
+
+        return jsonify({
+            "error": "Sensor event history is temporarily unavailable."
+        }), 500
+
+
+# ==================================================
+# GET CAMERA EVENTS
+# ==================================================
+
+@app.get("/api/camera-events")
+@dashboard_login_required
+def get_camera_events():
+    """Return recent camera event metadata to the authenticated dashboard."""
+
+    if not CAMERA_EVENTS_FILE.exists():
+        return jsonify({
+            "events": [],
+            "count": 0,
+            "message": "No camera events have been saved yet.",
+        })
+
+    events = []
+
+    try:
+        with CAMERA_LOCK:
+            with CAMERA_EVENTS_FILE.open(
+                "r",
+                encoding="utf-8",
+            ) as file:
+                for line_number, line in enumerate(file, start=1):
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    try:
+                        event = json.loads(line)
+
+                        if isinstance(event, dict):
+                            events.append(event)
+
+                    except json.JSONDecodeError:
+                        app.logger.warning(
+                            "Skipping invalid camera event log entry at line %s.",
+                            line_number,
+                        )
+
+        # Keep the latest 50 events, newest first.
+        events = events[-50:]
+        events.reverse()
+
+        return jsonify({
+            "events": events,
+            "count": len(events),
+        })
+
+    except OSError:
+        app.logger.exception(
+            "Unable to read camera event history."
+        )
+
+        return jsonify({
+            "error": "Camera event history is temporarily unavailable."
+        }), 500
+
+# ==================================================
+# GET IMAGE EVENTS
+# ==================================================
+
+@app.get("/api/image-events")
+@dashboard_login_required
+def get_image_events():
+    """Return image-event metadata to the authenticated dashboard."""
+
+    image_events_file = Path(__file__).resolve().parent / "image_events.jsonl"
+    events = []
+
+    if image_events_file.exists():
+        try:
+            with image_events_file.open("r", encoding="utf-8") as file:
+                for line in file:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        event = json.loads(line)
+                        if str(event.get("event_id", "")).startswith("image_"):
+                            events.append(event)
+                    except json.JSONDecodeError:
+                        continue
+
+        except OSError:
+            return jsonify({"error": "Could not read image events"}), 500
+
+    events.sort(
+        key=lambda event: event.get("timestamp_utc", ""),
+        reverse=True
+    )
+
+    return jsonify({
+        "events": events[:20],
+        "count": len(events)
+    })
+# ==================================================
+# VERIFY THE LOCAL HASH CHAIN
+# ==================================================
+
+@app.get("/api/verify-chain")
+@dashboard_login_required
+def verify_chain():
+    try:
+        # append_block() also uses CHAIN_LOCK. Do not acquire CSV_LOCK
+        # here: sensor writes acquire CSV_LOCK before CHAIN_LOCK.
+        with CHAIN_LOCK:
+            blocks = read_chain()
+
+        previous_hash = GENESIS_HASH
+
+        for expected_index, block in enumerate(blocks):
+            if block.get("index") != expected_index:
+                return jsonify({
+                    "valid": False,
+                    "error": "Block index mismatch",
+                    "block_index": expected_index,
+                }), 200
+
+            if block.get("previous_hash") != previous_hash:
+                return jsonify({
+                    "valid": False,
+                    "error": "Previous-hash link mismatch",
+                    "block_index": expected_index,
+                }), 200
+
+            if block.get("hash") != calculate_block_hash(block):
+                return jsonify({
+                    "valid": False,
+                    "error": (
+                        "Block hash mismatch; event may have been modified"
+                    ),
+                    "block_index": expected_index,
+                }), 200
+
+            previous_hash = block["hash"]
+
+        return jsonify({
+            "valid": True,
+            "message": "Hash chain verified successfully",
+            "block_count": len(blocks),
+            "latest_hash": previous_hash,
+        })
+
+    except Exception:
+        app.logger.exception(
+            "Hash-chain verification failed"
+        )
+
+        return jsonify({
+            "valid": False,
+            "error": "Unable to read or verify hash chain",
+        }), 500
+
+# ==================================================
+# VERIFIED ENCRYPTED IMAGE RECOVERY
+# ==================================================
+
+@app.get("/api/verified-image/<event_id>")
+@dashboard_login_required
+def recover_verified_image(event_id):
+    """
+    Retrieve an encrypted image using its Fabric ledger record,
+    verify its SHA-256 hash, and decrypt it in memory.
+    """
+
+    # Only accept IDs generated by the image upload workflow.
+    if not event_id.startswith("image_"):
+        return jsonify({"error": "Invalid image event ID."}), 400
+
+    if not FABRIC_GATEWAY_TOKEN:
+        return jsonify({
+            "error": "Image recovery service is unavailable."
+        }), 503
+
+    try:
+        # 1. Read the trusted reference and hash from Fabric.
+        ledger_url = (
+            FABRIC_GATEWAY_URL.rstrip("/")
+            + "/"
+            + event_id
+        )
+
+        ledger_response = requests.get(
+            ledger_url,
+            headers={
+                "Authorization": (
+                    f"Bearer {FABRIC_GATEWAY_TOKEN}"
+                )
+            },
+            timeout=15,
+        )
+        ledger_response.raise_for_status()
+
+        ledger_data = ledger_response.json()
+
+        if ledger_data.get("status") != "found":
+            return jsonify({
+                "error": "Image event was not found in Fabric."
+            }), 404
+
+        ledger_event = ledger_data.get("event", {})
+
+        if ledger_event.get("eventId") != event_id:
+            return jsonify({
+                "error": "Fabric event ID mismatch."
+            }), 409
+
+        expected_hash = ledger_event.get("encryptedFileHash", "")
+        cloud_reference = ledger_event.get("cloudReference", "")
+
+        if (
+            len(expected_hash) != 64
+            or any(c not in "0123456789abcdef"
+                   for c in expected_hash.lower())
+            or not cloud_reference
+            or not cloud_reference.startswith(
+                "encrypted_iot_events/"
+            )
+        ):
+            return jsonify({
+                "error": "Invalid image metadata in Fabric."
+            }), 409
+
+        # 2. Resolve the Cloudinary raw asset.
+        cloud_asset = cloudinary.api.resource(
+            cloud_reference,
+            resource_type="raw",
+        )
+
+        download_url = cloud_asset.get("secure_url")
+
+        if not download_url:
+            return jsonify({
+                "error": "Encrypted image is unavailable."
+            }), 502
+
+        # 3. Download with a strict size limit.
+        max_envelope_bytes = 10 * 1024 * 1024
+
+        with requests.get(
+            download_url,
+            stream=True,
+            timeout=(10, 30),
+        ) as response:
+            response.raise_for_status()
+
+            content_length = response.headers.get(
+                "Content-Length"
+            )
+
+            if content_length:
+                try:
+                    if int(content_length) > max_envelope_bytes:
+                        return jsonify({
+                            "error": "Encrypted image exceeds size limit."
+                        }), 413
+                except ValueError:
+                    return jsonify({
+                        "error": "Invalid image response."
+                    }), 502
+
+            chunks = []
+            total_bytes = 0
+
+            for chunk in response.iter_content(
+                chunk_size=64 * 1024
+            ):
+                if not chunk:
+                    continue
+
+                total_bytes += len(chunk)
+
+                if total_bytes > max_envelope_bytes:
+                    return jsonify({
+                        "error": "Encrypted image exceeds size limit."
+                    }), 413
+
+                chunks.append(chunk)
+
+            encrypted_bytes = b"".join(chunks)
+
+        # 4. Verify the exact bytes against the Fabric ledger.
+        actual_hash = hashlib.sha256(
+            encrypted_bytes
+        ).hexdigest()
+
+        if not secrets.compare_digest(
+            actual_hash,
+            expected_hash.lower(),
+        ):
+            app.logger.warning(
+                "Encrypted image hash verification failed for %s",
+                event_id,
+            )
+            return jsonify({
+                "error": "Image integrity verification failed."
+            }), 409
+
+        # 5. Parse the envelope and authenticate/decrypt it.
+        envelope = json.loads(
+            encrypted_bytes.decode("utf-8")
+        )
+
+        if envelope.get("format") != "AES-256-GCM-IMAGE":
+            return jsonify({
+                "error": "Unsupported encrypted image format."
+            }), 415
+
+        nonce = base64.b64decode(
+            envelope["nonce"],
+            validate=True,
+        )
+
+        ciphertext_with_tag = base64.b64decode(
+            envelope["ciphertext_and_tag"],
+            validate=True,
+        )
+
+        if len(nonce) != 12:
+            return jsonify({
+                "error": "Invalid encrypted image envelope."
+            }), 400
+
+        plaintext = CLOUD_AES.decrypt(
+            nonce,
+            ciphertext_with_tag,
+            None,
+        )
+
+        # 6. Accept only JPEG data from this endpoint.
+        if not plaintext.startswith(b"\xff\xd8\xff"):
+            return jsonify({
+                "error": "Decrypted data is not a valid JPEG."
+            }), 415
+
+        if len(plaintext) > max_envelope_bytes:
+            return jsonify({
+                "error": "Decrypted image exceeds size limit."
+            }), 413
+
+        # 7. Return the image only to the authenticated session.
+        return Response(
+            plaintext,
+            mimetype="image/jpeg",
+            headers={
+                "Cache-Control": "no-store, private",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "inline",
+            },
+        )
+
+    except requests.HTTPError:
+        app.logger.warning(
+            "Image recovery upstream request failed for %s",
+            event_id,
+        )
+        return jsonify({
+            "error": "Unable to retrieve the verified image."
+        }), 502
+
+    except Exception:
+        # Avoid returning keys, tokens, ciphertext, or internal details.
+        app.logger.exception(
+            "Verified image recovery failed for %s",
+            event_id,
+        )
+        return jsonify({
+            "error": "Image recovery failed."
+        }), 500
+
+
+
+# ==================================================
+# START SERVER
+# ==================================================
+# ==================================================
+# RECEIVE ENCRYPTED ANOMALY IMAGE FROM ESP32-CAM
+# ==================================================
+
+IMAGE_EVENTS_FILE = BASE_DIR / "image_events.jsonl"
+
+MAX_CAMERA_IMAGE_BYTES = 200 * 1024
+CAMERA_IMAGE_AAD_PREFIX = b"ESP32-CAM:IMAGE:"
+
+
+@app.post("/api/camera-image")
+@csrf.exempt
+@limiter.limit("10 per minute")
+def receive_camera_image():
+    envelope = request.get_json(silent=True)
+
+    if not isinstance(envelope, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+
+    required = ["device_id", "camera_event_id", "nonce", "ciphertext", "tag"]
+
+    if any(field not in envelope for field in required):
+        return jsonify({
+            "error": "Incomplete encrypted camera image",
+            "required_fields": required,
+        }), 400
+
+    if envelope.get("device_id") != "ESP32-CAM":
+        return jsonify({"error": "Invalid camera device ID"}), 400
+
+    camera_event_id = envelope.get("camera_event_id")
+
+    # Either "none" or an ID created by /api/camera-event.
+    if not isinstance(camera_event_id, str) or not (
+        camera_event_id == "none"
+        or (
+            camera_event_id.startswith("cam_")
+            and len(camera_event_id) == 36
+            and all(c in "0123456789abcdef" for c in camera_event_id[4:])
+        )
+    ):
+        return jsonify({"error": "Invalid camera event ID"}), 400
+
+    # ----------------------------------------------
+    # DECRYPT AND AUTHENTICATE
+    # ----------------------------------------------
+
+    try:
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        ciphertext = base64.b64decode(envelope["ciphertext"], validate=True)
+        tag = base64.b64decode(envelope["tag"], validate=True)
+
+        if len(nonce) != 12 or len(tag) != 16:
+            return jsonify({
+                "error": "Invalid nonce or authentication tag length"
+            }), 400
+
+        if not 0 < len(ciphertext) <= MAX_CAMERA_IMAGE_BYTES:
+            return jsonify({"error": "Invalid image size"}), 413
+
+        # The camera event ID is bound into the authenticated data,
+        # so an image cannot be re-attached to a different event.
+        jpeg_bytes = CAMERA_AES.decrypt(
+            nonce,
+            ciphertext + tag,
+            CAMERA_IMAGE_AAD_PREFIX + camera_event_id.encode("ascii"),
+        )
+
+    except Exception:
+        return jsonify({
+            "error": "Camera image authentication or decryption failed"
+        }), 400
+
+    if not jpeg_bytes.startswith(b"\xff\xd8\xff"):
+        return jsonify({"error": "Decrypted data is not a valid JPEG"}), 415
+
+    # ----------------------------------------------
+    # RE-ENCRYPT FOR CLOUD STORAGE AND UPLOAD
+    # (same envelope that /api/verified-image/<id> reads)
+    # ----------------------------------------------
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    public_id = f"image_{uuid.uuid4().hex}"
+
+    cloud_status = "failed"
+    cloud_public_id = None
+    fabric_status = "skipped"
+    fabric_event_id = None
+
+    try:
+        cloud_nonce = os.urandom(12)
+
+        cloud_ciphertext = CLOUD_AES.encrypt(
+            cloud_nonce,
+            jpeg_bytes,
+            None,
+        )
+
+        file_bytes = json.dumps(
+            {
+                "format": "AES-256-GCM-IMAGE",
+                "nonce": base64.b64encode(cloud_nonce).decode("ascii"),
+                "ciphertext_and_tag": base64.b64encode(
+                    cloud_ciphertext
+                ).decode("ascii"),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        encrypted_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        result = cloudinary.uploader.upload(
+            io.BytesIO(file_bytes),
+            resource_type="raw",
+            folder="encrypted_iot_events",
+            public_id=public_id,
+            overwrite=False,
+        )
+
+        cloud_public_id = result.get("public_id")
+
+        if not cloud_public_id:
+            raise RuntimeError("Cloud upload returned no public_id")
+
+        cloud_status = "uploaded"
+        fabric_event_id = cloud_public_id.rsplit("/", 1)[-1]
+
+        try:
+            record_event_on_fabric(
+                event_id=fabric_event_id,
+                timestamp=timestamp,
+                encrypted_file_hash=encrypted_hash,
+                cloud_reference=cloud_public_id,
+            )
+            fabric_status = "recorded"
+
+        except Exception:
+            fabric_status = "failed"
+            app.logger.exception(
+                "Failed to record camera image metadata on Fabric"
+            )
+
+    except Exception:
+        cloud_status = "failed"
+        fabric_status = "skipped"
+        app.logger.exception("Failed to upload encrypted camera image")
+
+    finally:
+        # Drop the plain image from memory as soon as possible.
+        jpeg_bytes = None
+
+    if cloud_status != "uploaded":
+        return jsonify({
+            "error": "Encrypted image upload failed",
+            "cloud_storage_status": cloud_status,
+        }), 502
+
+    # ----------------------------------------------
+    # SAVE METADATA (no image data) FOR THE DASHBOARD
+    # ----------------------------------------------
+
+    record = {
+        "event_id": fabric_event_id,
+        "timestamp_utc": timestamp,
+        "device_id": "ESP32-CAM",
+        "event_type": "Encrypted image",
+        "related_camera_event_id": camera_event_id,
+        "cloud_storage_status": cloud_status,
+        "cloud_public_id": cloud_public_id,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+    }
+
+    try:
+        with CAMERA_LOCK:
+            with IMAGE_EVENTS_FILE.open("a", encoding="utf-8") as file:
+                file.write(canonical_json(record) + "\n")
+
+    except OSError:
+        app.logger.exception("Failed to save image event metadata")
+
+    return jsonify({
+        "status": "success",
+        "message": "Encrypted camera image authenticated and stored",
+        "image_event_id": fabric_event_id,
+        "cloud_storage_status": cloud_status,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+    }), 201
+# ==================================================
+# STAGE 1: AUTHORISED VAULT
+# ==================================================
+# Sensitive device details (who / where / which department) are added to
+# each event BEFORE it is encrypted for Cloudinary, so the cloud and the
+# Fabric ledger never hold them in readable form. Only a signed-in
+# dashboard user who also unlocks a role password can fetch the record,
+# verify its hash against Fabric, and decrypt it.
+
+VAULT_DIR = Path(os.environ.get("LOCALAPPDATA", str(BASE_DIR))) / "iot_fabric"
+VAULT_INDEX_FILE = BASE_DIR / "vault_index.jsonl"
+VAULT_AUDIT_FILE = BASE_DIR / "vault_audit.jsonl"
+PROFILES_FILE = BASE_DIR / "device_profiles.json"
+VAULT_LOCK = threading.Lock()
+VAULT_SESSION_SECONDS = 300
+
+VAULT_ROLES = {
+    "factory_manager": {
+        "label": "Factory manager",
+        "domain": "factory",
+        "sees": "Humidity sensor details, original readings",
+    },
+    "doctor": {
+        "label": "Doctor",
+        "domain": "patient",
+        "sees": "Patient identity, heart-rate alerts and waveform",
+    },
+    "homeowner": {
+        "label": "Homeowner",
+        "domain": "home",
+        "sees": "Room and owner details, the original camera image",
+    },
+}
+
+# Made-up demonstration data. Edit device_profiles.json to change it.
+DEFAULT_PROFILES = {
+    "factory": {
+        "sensor_id": "HUM-DHT11-A07",
+        "sensor_model": "DHT11 + ESP32 (TinyML humidity classifier)",
+        "plant": "Riverside Textile Mill (demo)",
+        "department": "Dyeing and Finishing",
+        "location": "Bay 3, Rack C, 2.4 m above floor",
+        "floor": "Ground floor, East wing",
+        "responsible_manager": "Mr. R. Karthik (demo)",
+        "safe_humidity_limit": "70 %",
+        "installed_on": "2026-08-14",
+    },
+    "patient": {
+        "patient_id": "PT-20418",
+        "patient_name": "Meera Nair (demo)",
+        "age": 54,
+        "ward": "Cardiology Ward 2",
+        "bed": "Bed 14",
+        "attending_doctor": "Dr. S. Iyer (demo)",
+        "monitor": "Wrist pulse monitor (HW-627)",
+        "normal_bpm_range": "60 to 100",
+    },
+    "home": {
+        "owner": "Ameera",
+        "room": "Living room",
+        "camera_position": "Above the front door, facing the hallway",
+        "address": "12, Lakeview Residency, Chennai (demo address)",
+        "emergency_contact": "Family member (demo)",
+        "security_mode": "Armed",
+    },
+}
+
+
+def get_profile(domain):
+    try:
+        if PROFILES_FILE.exists():
+            data = json.loads(PROFILES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data.get(domain), dict):
+                return data[domain]
+        else:
+            PROFILES_FILE.write_text(
+                json.dumps(DEFAULT_PROFILES, indent=2),
+                encoding="utf-8",
+            )
+    except (OSError, ValueError):
+        app.logger.exception("Could not read device_profiles.json")
+
+    return DEFAULT_PROFILES.get(domain, {})
+
+
+def classify_domain(event):
+    """Decide which application an event belongs to from its content."""
+
+    if not isinstance(event, dict):
+        return None
+
+    if "humidity_percent" in event:
+        return "factory"
+
+    if "bpm" in event or "heart_rate_bpm" in event:
+        return "patient"
+
+    if str(event.get("event_id", "")).startswith("cam_"):
+        return "home"
+
+    return None
+
+
+def vault_audit(role, action, event_id="", result="ok"):
+    entry = {
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+        "role": role or "none",
+        "action": action,
+        "event_id": event_id,
+        "result": result,
+        "client": request.remote_addr if request else "",
+    }
+
+    try:
+        with VAULT_LOCK:
+            with VAULT_AUDIT_FILE.open("a", encoding="utf-8") as file:
+                file.write(canonical_json(entry) + "\n")
+    except OSError:
+        app.logger.exception("Could not write vault audit entry")
+
+
+def vault_register(domain, kind, cloud_public_id, timestamp, ref_id=None):
+    """Remember which cloud object belongs to which application."""
+
+    entry = {
+        "event_id": cloud_public_id.rsplit("/", 1)[-1],
+        "domain": domain,
+        "kind": kind,
+        "timestamp_utc": timestamp,
+        "cloud_public_id": cloud_public_id,
+        "ref_id": ref_id,
+    }
+
+    try:
+        with VAULT_LOCK:
+            with VAULT_INDEX_FILE.open("a", encoding="utf-8") as file:
+                file.write(canonical_json(entry) + "\n")
+    except OSError:
+        app.logger.exception("Could not write vault index entry")
+
+
+def vault_read_index():
+    entries = []
+
+    if not VAULT_INDEX_FILE.exists():
+        return entries
+
+    try:
+        with VAULT_LOCK:
+            lines = VAULT_INDEX_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return entries
+
+    for line in lines:
+        try:
+            item = json.loads(line)
+            if isinstance(item, dict) and item.get("event_id"):
+                entries.append(item)
+        except ValueError:
+            continue
+
+    return entries
+
+
+def vault_image_links():
+    """Map image event id -> camera event id (from image_events.jsonl)."""
+
+    links = {}
+    path = BASE_DIR / "image_events.jsonl"
+
+    if not path.exists():
+        return links
+
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+                links[item["event_id"]] = item.get(
+                    "related_camera_event_id"
+                )
+            except (ValueError, KeyError):
+                continue
+    except OSError:
+        pass
+
+    return links
+
+
+# ---- Wrap the existing upload so the profile is encrypted with the event
+
+_original_upload_encrypted_event_to_cloud = upload_encrypted_event_to_cloud
+
+
+def upload_encrypted_event_to_cloud(event):  # noqa: F811
+    domain = classify_domain(event)
+    payload = event
+
+    if domain:
+        payload = dict(event)
+        payload["profile_domain"] = domain
+        payload["profile"] = get_profile(domain)
+
+    result = _original_upload_encrypted_event_to_cloud(payload)
+
+    if domain and result.get("public_id"):
+        vault_register(
+            domain=domain,
+            kind="event",
+            cloud_public_id=result["public_id"],
+            timestamp=event.get("timestamp_utc"),
+            ref_id=event.get("event_id"),
+        )
+
+    return result
+
+
+# ---- Wrap the Fabric call so encrypted camera images are indexed too
+
+_original_record_event_on_fabric = record_event_on_fabric
+
+
+def record_event_on_fabric(*args, **kwargs):  # noqa: F811
+    event_id = kwargs.get("event_id") or (args[0] if args else "")
+    reference = kwargs.get("cloud_reference") or (
+        args[3] if len(args) > 3 else ""
+    )
+    timestamp = kwargs.get("timestamp") or (
+        args[1] if len(args) > 1 else ""
+    )
+
+    if str(event_id).startswith("image_") and reference:
+        vault_register(
+            domain="home",
+            kind="image",
+            cloud_public_id=reference,
+            timestamp=timestamp,
+        )
+
+    return _original_record_event_on_fabric(*args, **kwargs)
+
+
+# ---- Role passwords (hashes only, stored outside the project folder)
+
+def vault_role_hash(role):
+    path = VAULT_DIR / f"vault_{role}.hash"
+
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        return value or None
+    except OSError:
+        return None
+
+
+def vault_current_role():
+    role = session.get("vault_role")
+    until = session.get("vault_until", 0)
+
+    if role in VAULT_ROLES and time.time() < until:
+        return role
+
+    session.pop("vault_role", None)
+    session.pop("vault_until", None)
+    return None
+
+
+def vault_error(message, status):
+    return jsonify({"error": message}), status
+
+
+# ---- Fetch, verify and decrypt one cloud object
+
+class VaultError(Exception):
+    def __init__(self, message, status=502, steps=None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.steps = steps or []
+
+
+def vault_fetch_verified(event_id):
+    """
+    1. Read the trusted hash and cloud reference from Fabric.
+    2. Download the encrypted object from Cloudinary.
+    3. Compare its SHA-256 with the ledger.
+    4. Decrypt with AES-256-GCM (this also authenticates it).
+    Returns (plaintext_bytes, envelope_format, steps).
+    """
+
+    steps = []
+
+    if not FABRIC_GATEWAY_TOKEN:
+        raise VaultError("Fabric gateway is not configured.", 503, steps)
+
+    try:
+        ledger_response = requests.get(
+            FABRIC_GATEWAY_URL.rstrip("/") + "/" + event_id,
+            headers={"Authorization": f"Bearer {FABRIC_GATEWAY_TOKEN}"},
+            timeout=15,
+        )
+        ledger_response.raise_for_status()
+        ledger_data = ledger_response.json()
+    except Exception:
+        steps.append({"name": "Ledger record", "ok": False,
+                      "detail": "Fabric did not answer."})
+        raise VaultError("Could not read the Fabric ledger.", 502, steps)
+
+    ledger_event = ledger_data.get("event", {}) if isinstance(
+        ledger_data, dict) else {}
+
+    expected_hash = str(ledger_event.get("encryptedFileHash", "")).lower()
+    reference = str(ledger_event.get("cloudReference", ""))
+
+    if (
+        ledger_data.get("status") != "found"
+        or ledger_event.get("eventId") != event_id
+        or len(expected_hash) != 64
+        or any(c not in "0123456789abcdef" for c in expected_hash)
+        or not reference.startswith("encrypted_iot_events/")
+    ):
+        steps.append({"name": "Ledger record", "ok": False,
+                      "detail": "No valid record for this event on Fabric."})
+        raise VaultError("Event is not on the Fabric ledger.", 404, steps)
+
+    steps.append({
+        "name": "Ledger record",
+        "ok": True,
+        "detail": "Found on Hyperledger Fabric",
+        "ledger_time": ledger_event.get("timestamp"),
+        "ledger_hash": expected_hash,
+    })
+
+    try:
+        asset = cloudinary.api.resource(reference, resource_type="raw")
+        download_url = asset.get("secure_url")
+
+        if not download_url:
+            raise RuntimeError("no url")
+
+        limit = 10 * 1024 * 1024
+        chunks = []
+        total = 0
+
+        with requests.get(download_url, stream=True,
+                          timeout=(10, 30)) as response:
+            response.raise_for_status()
+
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    raise RuntimeError("too large")
+                chunks.append(chunk)
+
+        encrypted_bytes = b"".join(chunks)
+
+    except Exception:
+        steps.append({"name": "Encrypted file", "ok": False,
+                      "detail": "Could not download from Cloudinary."})
+        raise VaultError("Could not download the encrypted file.", 502, steps)
+
+    actual_hash = hashlib.sha256(encrypted_bytes).hexdigest()
+
+    steps.append({
+        "name": "Encrypted file",
+        "ok": True,
+        "detail": f"Downloaded {len(encrypted_bytes)} bytes (ciphertext)",
+    })
+
+    if not secrets.compare_digest(actual_hash, expected_hash):
+        steps.append({"name": "Integrity check", "ok": False,
+                      "detail": "SHA-256 does not match the ledger."})
+        raise VaultError("Integrity verification failed.", 409, steps)
+
+    steps.append({
+        "name": "Integrity check",
+        "ok": True,
+        "detail": "SHA-256 of the cloud file matches the ledger",
+        "cloud_hash": actual_hash,
+    })
+
+    try:
+        envelope = json.loads(encrypted_bytes.decode("utf-8"))
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        blob = base64.b64decode(envelope["ciphertext_and_tag"],
+                                validate=True)
+
+        if len(nonce) != 12:
+            raise ValueError("nonce")
+
+        plaintext = CLOUD_AES.decrypt(nonce, blob, None)
+        envelope_format = envelope.get("format", "")
+
+    except Exception:
+        steps.append({"name": "AES-256-GCM decrypt", "ok": False,
+                      "detail": "Authentication tag check failed."})
+        raise VaultError("Decryption failed.", 400, steps)
+
+    steps.append({
+        "name": "AES-256-GCM decrypt",
+        "ok": True,
+        "detail": "Authentication tag valid; data decrypted in memory",
+    })
+
+    return plaintext, envelope_format, steps
+
+
+def vault_authorised_entry(event_id, role):
+    """Return the index entry only if it belongs to this role's domain."""
+
+    domain = VAULT_ROLES[role]["domain"]
+
+    for entry in vault_read_index():
+        if entry.get("event_id") == event_id and entry.get("domain") == domain:
+            return entry
+
+    return None
+
+
+# ---- Routes
+
+@app.get("/vault")
+@dashboard_login_required
+def vault_page():
+    return Response(
+        VAULT_PAGE,
+        mimetype="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/vault/status")
+@dashboard_login_required
+def vault_status():
+    role = vault_current_role()
+
+    return jsonify({
+        "unlocked": bool(role),
+        "role": role,
+        "label": VAULT_ROLES[role]["label"] if role else None,
+        "seconds_left": max(
+            0, int(session.get("vault_until", 0) - time.time())
+        ) if role else 0,
+        "roles": [
+            {
+                "key": key,
+                "label": value["label"],
+                "sees": value["sees"],
+                "configured": vault_role_hash(key) is not None,
+            }
+            for key, value in VAULT_ROLES.items()
+        ],
+    })
+
+
+@app.post("/api/vault/unlock")
+@dashboard_login_required
+@limiter.limit("6 per minute")
+def vault_unlock():
+    body = request.get_json(silent=True) or {}
+    role = body.get("role")
+    password = body.get("password", "")
+
+    if role not in VAULT_ROLES or not isinstance(password, str):
+        return vault_error("Choose a valid role.", 400)
+
+    stored = vault_role_hash(role)
+
+    if not stored:
+        return vault_error(
+            "This role has no password set yet. "
+            "Run set_vault_passwords.py first.", 503)
+
+    if not check_password_hash(stored, password):
+        vault_audit(role, "unlock", result="wrong password")
+        return vault_error("Wrong password for this role.", 403)
+
+    session["vault_role"] = role
+    session["vault_until"] = time.time() + VAULT_SESSION_SECONDS
+    vault_audit(role, "unlock")
+
+    return jsonify({"unlocked": True, "role": role})
+
+
+@app.post("/api/vault/lock")
+@dashboard_login_required
+def vault_lock():
+    vault_audit(session.get("vault_role"), "lock")
+    session.pop("vault_role", None)
+    session.pop("vault_until", None)
+    return jsonify({"unlocked": False})
+
+
+@app.get("/api/vault/records")
+@dashboard_login_required
+def vault_records():
+    role = vault_current_role()
+
+    if not role:
+        return vault_error("Authorised area is locked.", 401)
+
+    domain = VAULT_ROLES[role]["domain"]
+    links = vault_image_links()
+    rows = []
+
+    for entry in vault_read_index():
+        if entry.get("domain") != domain:
+            continue
+
+        rows.append({
+            "event_id": entry["event_id"],
+            "kind": entry.get("kind", "event"),
+            "timestamp_utc": entry.get("timestamp_utc"),
+            "related": links.get(entry["event_id"]) or entry.get("ref_id"),
+        })
+
+    rows.sort(key=lambda r: r.get("timestamp_utc") or "", reverse=True)
+
+    return jsonify({"role": role, "records": rows[:50]})
+
+
+@app.get("/api/vault/event/<event_id>")
+@dashboard_login_required
+def vault_event(event_id):
+    role = vault_current_role()
+
+    if not role:
+        return vault_error("Authorised area is locked.", 401)
+
+    entry = vault_authorised_entry(event_id, role)
+
+    if not entry:
+        vault_audit(role, "decrypt", event_id, "denied")
+        return vault_error("Your role cannot open this record.", 403)
+
+    try:
+        plaintext, envelope_format, steps = vault_fetch_verified(event_id)
+    except VaultError as exc:
+        vault_audit(role, "decrypt", event_id, exc.message)
+        return jsonify({"error": exc.message, "steps": exc.steps}), exc.status
+
+    vault_audit(role, "decrypt", event_id)
+
+    if envelope_format == "AES-256-GCM-IMAGE":
+        return jsonify({
+            "kind": "image",
+            "steps": steps,
+            "image_url": f"/api/vault/image/{event_id}",
+            "reading": {},
+            "profile": {},
+            "related": vault_image_links().get(event_id),
+        })
+
+    try:
+        document = json.loads(plaintext.decode("utf-8"))
+    except ValueError:
+        return vault_error("Decrypted data is not valid JSON.", 415)
+
+    profile = document.pop("profile", {})
+    document.pop("profile_domain", None)
+
+    linked_images = []
+
+    if entry.get("ref_id"):
+        for image_id, camera_id in vault_image_links().items():
+            if camera_id == entry["ref_id"] and vault_authorised_entry(
+                image_id, role
+            ):
+                linked_images.append(image_id)
+
+    return jsonify({
+        "kind": "event",
+        "steps": steps,
+        "reading": document,
+        "profile": profile,
+        "linked_images": linked_images,
+    })
+
+
+@app.get("/api/vault/image/<event_id>")
+@dashboard_login_required
+def vault_image(event_id):
+    role = vault_current_role()
+
+    if not role:
+        return vault_error("Authorised area is locked.", 401)
+
+    entry = vault_authorised_entry(event_id, role)
+
+    if not entry or entry.get("kind") != "image":
+        return vault_error("Your role cannot open this image.", 403)
+
+    try:
+        plaintext, envelope_format, _steps = vault_fetch_verified(event_id)
+    except VaultError as exc:
+        return vault_error(exc.message, exc.status)
+
+    if (envelope_format != "AES-256-GCM-IMAGE"
+            or not plaintext.startswith(b"\xff\xd8\xff")):
+        return vault_error("Not a valid encrypted image.", 415)
+
+    vault_audit(role, "view image", event_id)
+
+    return Response(
+        plaintext,
+        mimetype="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, private",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+VAULT_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorised Personnel Only</title>
+<style>
+:root{
+  --bg:#08111f;--panel:#0e1a2e;--panel2:#12223a;--line:#1f3250;
+  --text:#e6eefb;--muted:#8aa0c0;--cyan:#52d6d0;--green:#4ade80;
+  --red:#ff6b6b;--amber:#fbbf24;--violet:#a78bfa;
+}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,#12315a55,transparent),var(--bg);
+  color:var(--text);font-family:system-ui,Segoe UI,Roboto,sans-serif;min-height:100vh}
+header{display:flex;justify-content:space-between;align-items:center;
+  padding:14px 20px;border-bottom:1px solid var(--line);gap:12px;flex-wrap:wrap}
+a.back{color:var(--cyan);text-decoration:none;font-size:14px}
+h1{font-size:18px;margin:0;letter-spacing:.04em}
+.warn{color:var(--amber);font-size:12px;letter-spacing:.14em;text-transform:uppercase}
+main{max-width:1100px;margin:0 auto;padding:22px 16px 60px}
+.hidden{display:none!important}
+.roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:18px 0}
+.role{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;
+  cursor:pointer;transition:transform .2s,border-color .2s,box-shadow .2s;text-align:left;color:inherit;font:inherit}
+.role:hover{transform:translateY(-3px);border-color:var(--cyan)}
+.role.sel{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan),0 10px 30px #52d6d022}
+.role .ico{font-size:28px}
+.role b{display:block;margin:8px 0 4px}
+.role span{color:var(--muted);font-size:13px}
+.role .off{color:var(--red);font-size:12px;margin-top:6px;display:block}
+.unlock{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;
+  display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+input[type=password]{flex:1;min-width:200px;background:var(--bg);border:1px solid var(--line);
+  color:var(--text);padding:12px 14px;border-radius:10px;font-size:15px}
+button.primary{background:var(--cyan);color:#04201f;border:0;padding:12px 20px;border-radius:10px;
+  font-weight:700;cursor:pointer}
+button.ghost{background:transparent;color:var(--text);border:1px solid var(--line);
+  padding:8px 14px;border-radius:10px;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+.err{color:var(--red);font-size:14px;margin-top:10px;min-height:20px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.pill{background:var(--panel2);border:1px solid var(--line);border-radius:99px;padding:6px 12px;font-size:13px}
+.pill b{color:var(--cyan)}
+.cols{display:grid;grid-template-columns:320px 1fr;gap:16px}
+@media(max-width:820px){.cols{grid-template-columns:1fr}}
+.list,.detail{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.rec{display:block;width:100%;text-align:left;background:var(--panel2);border:1px solid transparent;
+  color:inherit;font:inherit;border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+.rec:hover{border-color:var(--cyan)}
+.rec.sel{border-color:var(--cyan)}
+.rec small{display:block;color:var(--muted);margin-top:3px;font-family:ui-monospace,Consolas,monospace;font-size:11px}
+.tag{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--violet);margin-left:6px}
+.empty{color:var(--muted);padding:30px 10px;text-align:center}
+.step{display:flex;gap:10px;align-items:flex-start;padding:8px 0;opacity:0;transform:translateY(6px);
+  animation:in .4s forwards}
+@keyframes in{to{opacity:1;transform:none}}
+.step .dot{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:13px;
+  flex:none;background:#4ade8022;color:var(--green);border:1px solid var(--green)}
+.step.bad .dot{background:#ff6b6b22;color:var(--red);border-color:var(--red)}
+.step b{font-size:14px}.step span{display:block;color:var(--muted);font-size:12px;
+  font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px}
+.tile small{color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-size:11px}
+.tile .v{font-size:28px;font-weight:700;color:var(--cyan);font-family:ui-monospace,Consolas,monospace}
+h3{margin:18px 0 8px;font-size:13px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+table{width:100%;border-collapse:collapse}
+td{padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
+td:first-child{color:var(--muted);width:42%}
+td.v{font-family:ui-monospace,Consolas,monospace}
+img.shot{max-width:100%;border-radius:10px;border:1px solid var(--line);image-rendering:pixelated;
+  width:100%;max-width:480px;background:#000}
+.note{color:var(--muted);font-size:12px;margin-top:14px}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01s!important;transition:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <div><a class="back" href="/">&larr; Dashboard</a></div>
+  <div style="text-align:center"><div class="warn">Authorised personnel only</div>
+    <h1>Encrypted Vault</h1></div>
+  <div id="timer" class="pill hidden"></div>
+</header>
+<main>
+  <section id="lockView">
+    <p style="color:var(--muted)">Sensitive details are stored only as AES-256-GCM ciphertext in the cloud.
+      Choose your role and enter its password to fetch, verify and decrypt them.</p>
+    <div class="roles" id="roles"></div>
+    <div class="unlock">
+      <input id="pw" type="password" placeholder="Role password" autocomplete="off">
+      <button class="primary" id="unlockBtn">Unlock</button>
+    </div>
+    <div class="err" id="err"></div>
+  </section>
+
+  <section id="openView" class="hidden">
+    <div class="bar">
+      <div class="pill">Signed in as <b id="roleName"></b></div>
+      <button class="ghost" id="lockBtn">Lock now</button>
+    </div>
+    <div class="cols">
+      <div class="list"><div id="records"></div></div>
+      <div class="detail" id="detail"><div class="empty">Select a record to verify and decrypt it.</div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const ICONS = {factory_manager:"\u{1F3ED}", doctor:"\u{1FA7A}", homeowner:"\u{1F3E0}"};
+let csrf = "", chosen = null, tick = null, selected = null;
+
+function h(tag, props, ...kids){
+  const e = document.createElement(tag);
+  Object.assign(e, props || {});
+  kids.flat().forEach(k => e.append(k));
+  return e;
+}
+const nice = k => k.replace(/_/g," ").replace(/^./, c => c.toUpperCase());
+const fmtTime = t => t ? new Date(t).toLocaleString() : "unknown";
+
+async function api(url, opts){
+  const r = await fetch(url, {credentials:"same-origin", ...opts});
+  let data = {};
+  try { data = await r.json(); } catch(e){}
+  if(!r.ok){ const e = new Error(data.error || ("HTTP " + r.status)); e.data = data; e.status = r.status; throw e; }
+  return data;
+}
+
+async function loadCsrf(){ csrf = (await api("/api/dashboard-info")).csrf_token; }
+
+function scramble(el, finalText){
+  const chars = "0123456789abcdef#%@";
+  if(matchMedia("(prefers-reduced-motion: reduce)").matches){ el.textContent = finalText; return; }
+  let n = 0;
+  const id = setInterval(() => {
+    n++;
+    el.textContent = finalText.split("").map((c,i) =>
+      (c === " " || i < n/1.2) ? c : chars[Math.floor(Math.random()*chars.length)]).join("");
+    if(n > finalText.length*1.2 + 4){ clearInterval(id); el.textContent = finalText; }
+  }, 30);
+}
+
+function renderRoles(roles){
+  const box = $("roles"); box.innerHTML = "";
+  roles.forEach(r => {
+    const b = h("button", {className:"role", type:"button"},
+      h("div", {className:"ico", textContent:ICONS[r.key] || "\u{1F512}"}),
+      h("b", {textContent:r.label}),
+      h("span", {textContent:r.sees}));
+    if(!r.configured) b.append(h("span", {className:"off", textContent:"No password set yet"}));
+    b.onclick = () => { chosen = r.key;
+      [...box.children].forEach(c => c.classList.remove("sel")); b.classList.add("sel"); $("pw").focus(); };
+    box.append(b);
+  });
+}
+
+function showLocked(roles){
+  $("lockView").classList.remove("hidden");
+  $("openView").classList.add("hidden");
+  $("timer").classList.add("hidden");
+  clearInterval(tick);
+  if(roles) renderRoles(roles);
+}
+
+function showOpen(status){
+  $("lockView").classList.add("hidden");
+  $("openView").classList.remove("hidden");
+  $("roleName").textContent = status.label;
+  $("timer").classList.remove("hidden");
+  let left = status.seconds_left;
+  clearInterval(tick);
+  const draw = () => {
+    const m = Math.floor(left/60), s = String(left%60).padStart(2,"0");
+    $("timer").textContent = "\u{1F513} auto-locks in " + m + ":" + s;
+  };
+  draw();
+  tick = setInterval(() => { left--; if(left <= 0){ clearInterval(tick); init(); } else draw(); }, 1000);
+  loadRecords();
+}
+
+async function loadRecords(){
+  const box = $("records"); box.innerHTML = "";
+  let data;
+  try { data = await api("/api/vault/records"); } catch(e){ box.append(h("div",{className:"empty",textContent:e.message})); return; }
+  if(!data.records.length){
+    box.append(h("div",{className:"empty",textContent:"No protected records yet for this role."})); return; }
+  data.records.forEach(r => {
+    const b = h("button", {className:"rec", type:"button"},
+      h("div", {}, h("b",{textContent:fmtTime(r.timestamp_utc)}),
+        h("span",{className:"tag",textContent:r.kind === "image" ? "encrypted image" : "event"})),
+      h("small",{textContent:r.event_id}));
+    b.onclick = () => { selected = r.event_id;
+      [...box.children].forEach(c => c.classList.remove("sel")); b.classList.add("sel"); openRecord(r); };
+    box.append(b);
+  });
+}
+
+function table(obj){
+  const t = h("table");
+  Object.entries(obj).forEach(([k,v]) => {
+    const td = h("td",{className:"v"});
+    t.append(h("tr",{}, h("td",{textContent:nice(k)}), td));
+    scramble(td, typeof v === "object" ? JSON.stringify(v) : String(v));
+  });
+  return t;
+}
+
+function waveCanvas(samples){
+  const c = h("canvas",{width:760,height:200});
+  c.style.cssText = "width:100%;background:#050c18;border:1px solid var(--line);border-radius:10px";
+  const g = c.getContext("2d");
+  const lo = Math.min(...samples), hi = Math.max(...samples), span = Math.max(1, hi - lo);
+  const pt = i => [i/(samples.length-1)*(c.width-20)+10, c.height-14-((samples[i]-lo)/span)*(c.height-28)];
+  let n = matchMedia("(prefers-reduced-motion: reduce)").matches ? samples.length : 1;
+  function frame(){
+    g.clearRect(0,0,c.width,c.height);
+    g.strokeStyle = "#1f3250"; g.lineWidth = 1;
+    for(let y=1;y<5;y++){ g.beginPath(); g.moveTo(0,y*c.height/5); g.lineTo(c.width,y*c.height/5); g.stroke(); }
+    g.strokeStyle = "#ff6b6b"; g.lineWidth = 2.5; g.lineJoin = "round"; g.shadowColor = "#ff6b6b"; g.shadowBlur = 8;
+    g.beginPath();
+    for(let i=0;i<n;i++){ const [x,y] = pt(i); i ? g.lineTo(x,y) : g.moveTo(x,y); }
+    g.stroke();
+    if(n < samples.length){ n = Math.min(samples.length, n + 2); requestAnimationFrame(frame); }
+  }
+  frame();
+  return c;
+}
+
+async function openRecord(r){
+  const d = $("detail");
+  d.innerHTML = "";
+  d.append(h("div",{className:"empty",textContent:"Fetching from Fabric and Cloudinary…"}));
+  let data;
+  try { data = await api("/api/vault/event/" + encodeURIComponent(r.event_id)); }
+  catch(e){
+    d.innerHTML = "";
+    (e.data && e.data.steps || []).forEach((s,i) => d.append(stepEl(s,i)));
+    d.append(h("div",{className:"err",textContent:e.message}));
+    return;
+  }
+  d.innerHTML = "";
+  d.append(h("h3",{textContent:"Verification"}));
+  data.steps.forEach((s,i) => d.append(stepEl(s,i)));
+  const delay = data.steps.length*350 + 200;
+
+  setTimeout(async () => {
+    if(selected !== r.event_id) return;
+    if(data.kind === "image"){
+      d.append(h("h3",{textContent:"Decrypted image"}));
+      try{
+        const resp = await fetch(data.image_url, {credentials:"same-origin"});
+        if(!resp.ok) throw new Error("image");
+        const img = h("img",{className:"shot",alt:"Decrypted camera image"});
+        img.src = URL.createObjectURL(await resp.blob());
+        d.append(img);
+      }catch(e){ d.append(h("div",{className:"err",textContent:"Could not decrypt the image."})); }
+      return;
+    }
+    const rd = data.reading || {};
+    const tiles = h("div",{className:"tiles"});
+    [["humidity_percent","Humidity","%"],["temperature_c","Temperature","°C"],
+     ["bpm","Heart rate","BPM"],["person_confidence","Person confidence",""],
+     ["motion_score","Motion score",""]].forEach(([k,label,unit]) => {
+      if(rd[k] === undefined) return;
+      const v = h("div",{className:"v"});
+      tiles.append(h("div",{className:"tile"}, h("small",{textContent:label}), v));
+      scramble(v, (typeof rd[k] === "number" ? (Number.isInteger(rd[k]) ? rd[k] : rd[k].toFixed(k==="person_confidence"?3:1)) : rd[k]) + (unit ? " " + unit : ""));
+    });
+    d.append(h("h3",{textContent:"Original reading"}), tiles);
+    if(Array.isArray(rd.waveform) && rd.waveform.length){
+      d.append(h("h3",{textContent:"Heart-rate trace (decrypted)"}), waveCanvas(rd.waveform));
+    }
+    d.append(table(Object.fromEntries(Object.entries(rd).filter(([k]) => k !== "waveform"))));
+    if(Object.keys(data.profile||{}).length){
+      d.append(h("h3",{textContent:"Restricted details (never shown on the dashboard or stored readable in the cloud)"}), table(data.profile));
+    }
+    for(const id of (data.linked_images || [])){
+      d.append(h("h3",{textContent:"Captured image"}));
+      try{
+        const resp = await fetch("/api/vault/image/" + id, {credentials:"same-origin"});
+        if(!resp.ok) throw new Error("x");
+        const img = h("img",{className:"shot",alt:"Decrypted camera image"});
+        img.src = URL.createObjectURL(await resp.blob());
+        d.append(img);
+      }catch(e){ d.append(h("div",{className:"err",textContent:"Image could not be decrypted."})); }
+    }
+    d.append(h("div",{className:"note",textContent:"This view is logged. Decrypted data exists only in memory and in this page."}));
+  }, delay);
+}
+
+function stepEl(s,i){
+  const el = h("div",{className:"step" + (s.ok ? "" : " bad")},
+    h("div",{className:"dot",textContent:s.ok ? "✓" : "✕"}),
+    h("div",{}, h("b",{textContent:s.name}),
+      h("span",{textContent:s.detail + (s.ledger_hash ? " · hash " + s.ledger_hash.slice(0,16) + "…" : "")})));
+  el.style.animationDelay = (i*350) + "ms";
+  return el;
+}
+
+$("unlockBtn").onclick = async () => {
+  $("err").textContent = "";
+  if(!chosen){ $("err").textContent = "Choose a role first."; return; }
+  $("unlockBtn").disabled = true;
+  try{
+    await api("/api/vault/unlock", {method:"POST",
+      headers:{"Content-Type":"application/json","X-CSRFToken":csrf},
+      body:JSON.stringify({role:chosen, password:$("pw").value})});
+    $("pw").value = "";
+    init();
+  }catch(e){ $("err").textContent = e.message; }
+  finally{ $("unlockBtn").disabled = false; }
+};
+$("pw").addEventListener("keydown", e => { if(e.key === "Enter") $("unlockBtn").click(); });
+$("lockBtn").onclick = async () => {
+  await api("/api/vault/lock", {method:"POST", headers:{"X-CSRFToken":csrf}});
+  $("detail").innerHTML = ""; init();
+};
+
+async function init(){
+  try{
+    await loadCsrf();
+    const st = await api("/api/vault/status");
+    if(st.unlocked) showOpen(st); else showLocked(st.roles);
+  }catch(e){
+    if(e.status === 401) location.href = "/login";
+    else $("err").textContent = e.message;
+  }
+}
+init();
+</script>
+</body>
+</html>
+"""
+
+
+# ==================================================
+# STAGE 2: HW-627 PULSE SENSOR (heart-rate anomaly)
+# ==================================================
+# The ESP32 encrypts each pulse report with the same sensor AES key as the
+# DHT11 and posts it here. Finger on the sensor = ANOMALY (demo stand-in
+# for an abnormal heart rate); no finger = NORMAL.
+#
+# Privacy: the BPM and waveform are NEVER written to the CSV, the local
+# hash chain, or the dashboard list. They exist only inside the encrypted
+# Cloudinary record (together with the patient profile).
+
+PULSE_EVENTS_FILE = BASE_DIR / "pulse_events.jsonl"
+PULSE_LOCK = threading.Lock()
+PULSE_LIVE = {"status": "NO DATA", "last_seen": None}
+
+
+@app.post("/api/pulse")
+@csrf.exempt
+@limiter.limit("30 per minute")
+def receive_pulse():
+    envelope = request.get_json(silent=True)
+
+    if not isinstance(envelope, dict):
+        return jsonify({"error": "Expected a JSON object"}), 400
+
+    required = ["device_id", "nonce", "ciphertext", "tag"]
+
+    if any(field not in envelope for field in required):
+        return jsonify({"error": "Encrypted envelope is incomplete"}), 400
+
+    device_id = envelope["device_id"]
+
+    if not isinstance(device_id, str) or not device_id or len(device_id) > 64:
+        return jsonify({"error": "Invalid device_id"}), 400
+
+    try:
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        ciphertext = base64.b64decode(envelope["ciphertext"], validate=True)
+        tag = base64.b64decode(envelope["tag"], validate=True)
+
+        if len(nonce) != 12 or len(tag) != 16 or len(ciphertext) > 8192:
+            return jsonify({"error": "Invalid envelope sizes"}), 400
+
+        plaintext = AES.decrypt(
+            nonce,
+            ciphertext + tag,
+            device_id.encode("utf-8"),
+        )
+        data = json.loads(plaintext.decode("utf-8"))
+
+    except Exception:
+        return jsonify({
+            "error": "Encrypted pulse verification or decryption failed"
+        }), 400
+
+    if (
+        not isinstance(data, dict)
+        or data.get("device_id") != device_id
+        or data.get("sensor") != "HW-627"
+        or data.get("status") not in ("NORMAL", "ANOMALY")
+    ):
+        return jsonify({"error": "Invalid pulse payload"}), 400
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    if data["status"] == "NORMAL":
+        PULSE_LIVE["status"] = "NORMAL"
+        PULSE_LIVE["last_seen"] = timestamp
+
+        return jsonify({
+            "status": "success",
+            "prediction": "NORMAL",
+            "timestamp_utc": timestamp,
+        }), 200
+
+    # ----------------------------------------------
+    # ANOMALY: validate the reading
+    # ----------------------------------------------
+
+    try:
+        bpm = int(data.get("bpm", 0))
+        rate = int(data.get("sample_rate_hz", 50))
+        waveform = data.get("waveform", [])
+
+        if not 0 <= bpm <= 250:
+            raise ValueError("bpm")
+
+        if not 10 <= rate <= 200:
+            raise ValueError("rate")
+
+        if (
+            not isinstance(waveform, list)
+            or len(waveform) > 300
+            or any(
+                not isinstance(v, int) or not 0 <= v <= 4095
+                for v in waveform
+            )
+        ):
+            raise ValueError("waveform")
+
+    except (TypeError, ValueError):
+        return jsonify({"error": "Pulse values are out of range"}), 400
+
+    event_id = "pulse_" + uuid.uuid4().hex
+
+    # Full record: goes ONLY into the encrypted cloud file.
+    record = {
+        "event_id": event_id,
+        "timestamp_utc": timestamp,
+        "device_id": device_id,
+        "sensor": "HW-627",
+        "status": "ANOMALY",
+        "finger_detected": True,
+        "bpm": bpm,
+        "sample_rate_hz": rate,
+        "waveform": waveform,
+    }
+
+    # Local chain gets a content-free block (no health values).
+    try:
+        block = append_block({
+            "event_id": event_id,
+            "timestamp_utc": timestamp,
+            "device_id": device_id,
+            "event_type": "PULSE_ANOMALY",
+        })
+    except Exception:
+        app.logger.exception("Could not append pulse block to hash chain")
+        return jsonify({"error": "Local hash-chain operation failed"}), 500
+
+    PULSE_LIVE["status"] = "ANOMALY"
+    PULSE_LIVE["last_seen"] = timestamp
+
+    cloud_status = "failed"
+    fabric_status = "skipped"
+    cloud_public_id = None
+    fabric_event_id = None
+
+    try:
+        cloud_result = upload_encrypted_event_to_cloud(record)
+        cloud_public_id = cloud_result.get("public_id")
+        encrypted_hash = cloud_result.get("encrypted_file_hash")
+
+        if not cloud_public_id or not encrypted_hash:
+            raise RuntimeError("Cloud upload returned incomplete metadata")
+
+        cloud_status = "uploaded"
+        fabric_event_id = cloud_public_id.rsplit("/", 1)[-1]
+
+        try:
+            record_event_on_fabric(
+                event_id=fabric_event_id,
+                timestamp=timestamp,
+                encrypted_file_hash=encrypted_hash,
+                cloud_reference=cloud_public_id,
+            )
+            fabric_status = "recorded"
+
+        except Exception:
+            fabric_status = "failed"
+            app.logger.exception("Failed to record pulse metadata on Fabric")
+
+    except Exception:
+        cloud_status = "failed"
+        fabric_status = "skipped"
+        app.logger.exception("Failed to upload encrypted pulse event")
+
+    # Metadata only (no BPM, no waveform, no patient details).
+    meta = {
+        "event_id": event_id,
+        "timestamp_utc": timestamp,
+        "device_id": "ESP32-PULSE",
+        "event_type": "Heart-rate anomaly",
+        "cloud_storage_status": cloud_status,
+        "cloud_public_id": cloud_public_id,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+        "block_index": block["index"],
+    }
+
+    try:
+        with PULSE_LOCK:
+            with PULSE_EVENTS_FILE.open("a", encoding="utf-8") as file:
+                file.write(canonical_json(meta) + "\n")
+    except OSError:
+        app.logger.exception("Failed to save pulse event metadata")
+
+    send_telegram_alert_async(
+        "pulse_anomaly",
+        (
+            "❤️ ABNORMAL HEART-RATE ALERT\n"
+            "A monitored patient needs attention.\n"
+            f"Event ID: {event_id}\n"
+            f"Time (UTC): {timestamp}\n"
+            f"Cloudinary: {cloud_status} | Fabric: {fabric_status}\n"
+            "Patient details and the heart-rate trace are not sent in "
+            "Telegram. Doctors: sign in to the dashboard, open the "
+            "authorised area and unlock the Doctor role."
+        ),
+    )
+
+    return jsonify({
+        "status": "success",
+        "prediction": "ANOMALY",
+        "event_id": event_id,
+        "timestamp_utc": timestamp,
+        "block_index": block["index"],
+        "cloud_storage_status": cloud_status,
+        "fabric_status": fabric_status,
+        "fabric_event_id": fabric_event_id,
+    }), 201
+
+
+@app.get("/api/pulse-events")
+@dashboard_login_required
+def get_pulse_events():
+    """Masked pulse-event list for the main dashboard."""
+
+    events = []
+
+    if PULSE_EVENTS_FILE.exists():
+        try:
+            with PULSE_LOCK:
+                lines = PULSE_EVENTS_FILE.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+        except OSError:
+            return jsonify({"error": "Could not read pulse events"}), 500
+
+        for line in lines:
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    events.append(item)
+            except ValueError:
+                continue
+
+    events.reverse()
+
+    return jsonify({
+        "events": events[:20],
+        "count": len(events),
+        "live": PULSE_LIVE,
+    })
+
+
+# ==================================================
+# STAGE 4: COMMAND CENTER
+# ==================================================
+# Real-time trace of every event (each step is reported by the server at
+# the moment it happens, Telegram only after Telegram confirms), a live
+# mirror of the devices' serial output, an integrity monitor that watches
+# the stored evidence, and an attack simulator that really edits that
+# evidence so the monitor can be seen catching it.
+# No readings, names or images are ever put in a trace.
+
+import collections
+import re
+from flask import g, has_request_context
+
+S4_LOCK = threading.RLock()
+S4_SEQ = [0]
+S4_RUNS = collections.deque(maxlen=100)
+S4_LOGS = collections.deque(maxlen=600)
+S4_LOG_SEQ = [0]
+S4_LAST_STEP = {}
+S4_LANES = {
+    "factory": {"count": 0, "last_seen": 0.0},
+    "home": {"count": 0, "last_seen": 0.0},
+    "patient": {"count": 0, "last_seen": 0.0},
+}
+S4_TELEMETRY = {"factory": {}}
+S4_ATTACK_ENABLED = os.environ.get("ATTACK_DEMO", "1") != "0"
+
+S4_FLOWS = {
+    "/api/sensor": ("humidity", "factory", "High humidity", "DHT11 node"),
+    "/api/camera-event": ("camera", "home", "Person detected", "ESP32-CAM"),
+    "/api/camera-image": ("image", "home", "Anomaly image", "ESP32-CAM"),
+    "/api/pulse": ("pulse", "patient", "Heart-rate anomaly", "Pulse node"),
+}
+
+S4_SIGNIFICANT = {"encrypt_cloud", "cloud", "fabric", "alert"}
+
+
+def _s4_bump(run):
+    S4_SEQ[0] += 1
+    run["seq"] = S4_SEQ[0]
+
+
+def s4_emit(run, key, status, detail=""):
+    """Record one step. A 'running' step is updated in place when it ends."""
+
+    if run is None:
+        return
+
+    with S4_LOCK:
+        t_ms = int((time.time() - run["_t0"]) * 1000)
+        step = None
+
+        for existing in run["steps"]:
+            if existing["key"] == key and existing["status"] == "running":
+                step = existing
+                break
+
+        if step is None:
+            run["steps"].append({
+                "key": key, "status": status,
+                "detail": detail, "t_ms": t_ms,
+            })
+        else:
+            step["status"] = status
+            step["t_ms"] = t_ms
+            if detail:
+                step["detail"] = detail
+
+        if (key in S4_SIGNIFICANT or status == "fail") \
+                and not run["significant"]:
+            run["significant"] = True
+            S4_LANES[run["lane"]]["count"] += 1
+
+        if status in ("ok", "fail", "skipped"):
+            S4_LAST_STEP[key] = {"status": status, "t": time.time()}
+
+        _s4_bump(run)
+
+
+def pipeline_emit(key, status, detail=""):
+    run = getattr(g, "pipeline_run", None) if has_request_context() else None
+    s4_emit(run, key, status, detail)
+
+
+def s4_maybe_done(run):
+    with S4_LOCK:
+        if run["done"] or not run["http_done"] or run["pending"] > 0:
+            return
+
+        run["done"] = True
+        run["total_ms"] = int((time.time() - run["_t0"]) * 1000)
+        _s4_bump(run)
+
+
+@app.before_request
+def _s4_begin():
+    flow = S4_FLOWS.get(request.path)
+
+    if flow is None or request.method != "POST":
+        return
+
+    run = {
+        "id": uuid.uuid4().hex[:10],
+        "flow": flow[0], "lane": flow[1], "title": flow[2], "device": flow[3],
+        "src": request.remote_addr or "",
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "steps": [], "significant": False,
+        "done": False, "http": None, "http_done": False, "pending": 0,
+        "ref": None, "total_ms": None, "_t0": time.time(),
+    }
+
+    g.pipeline_run = run
+
+    with S4_LOCK:
+        S4_RUNS.append(run)
+        S4_LANES[flow[1]]["last_seen"] = time.time()
+        _s4_bump(run)
+
+    s4_emit(
+        run, "received", "ok",
+        f"Encrypted packet from {flow[3]} at {run['src']} "
+        f"({request.content_length or 0} bytes)")
+
+
+@app.after_request
+def _s4_end(response):
+    run = getattr(g, "pipeline_run", None)
+
+    if run is not None and not run["http_done"]:
+        run["http"] = response.status_code
+        run["http_done"] = True
+        s4_maybe_done(run)
+
+    return response
+
+
+@app.teardown_request
+def _s4_teardown(_error):
+    run = getattr(g, "pipeline_run", None)
+
+    if run is not None and not run["http_done"]:
+        run["http"] = 500
+        run["http_done"] = True
+        s4_maybe_done(run)
+
+
+# ---- AES objects report decrypt / cloud-encrypt as they really happen
+
+class S4TracedAES:
+    def __init__(self, real, kind):
+        self._real = real
+        self._kind = kind
+
+    def decrypt(self, nonce, data, aad):
+        try:
+            result = self._real.decrypt(nonce, data, aad)
+        except Exception:
+            if self._kind == "device":
+                pipeline_emit("decrypt", "fail",
+                              "Authentication tag INVALID. Packet rejected.")
+            raise
+
+        if self._kind == "device":
+            pipeline_emit("decrypt", "ok",
+                          "AES-256-GCM tag verified. Packet is authentic.")
+
+        return result
+
+    def encrypt(self, nonce, data, aad):
+        run = getattr(g, "pipeline_run", None) \
+            if has_request_context() else None
+
+        if self._kind == "cloud" and run is not None \
+                and run["flow"] == "image" and not run.get("img_block"):
+            run["img_block"] = True
+            camera_id = "none"
+            try:
+                camera_id = str((request.get_json(silent=True) or {}).get(
+                    "camera_event_id", "none"))[:40]
+            except Exception:
+                pass
+
+            append_block({
+                "event_id": "img_" + uuid.uuid4().hex[:16],
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "device_id": "ESP32-CAM",
+                "event_type": "ENCRYPTED_IMAGE",
+                "camera_event_id": camera_id,
+            })
+
+        result = self._real.encrypt(nonce, data, aad)
+
+        if self._kind == "cloud":
+            pipeline_emit(
+                "encrypt_cloud", "ok",
+                f"Re-encrypted with the cloud key ({len(result)} bytes)")
+
+        return result
+
+
+AES = S4TracedAES(AES, "device")  # noqa: F811
+CAMERA_AES = S4TracedAES(CAMERA_AES, "device")  # noqa: F811
+CLOUD_AES = S4TracedAES(CLOUD_AES, "cloud")  # noqa: F811
+
+
+# ---- Hash chain
+
+_s4_orig_append_block = append_block
+
+
+def append_block(event):  # noqa: F811
+    block = _s4_orig_append_block(event)
+
+    pipeline_emit(
+        "chain", "ok",
+        f"Block #{block['index']} sealed, fingerprint {block['hash'][:14]}...")
+
+    return block
+
+
+# Camera events did not write a chain block before; give them one
+# (content-free: no confidence, no image, no profile).
+_s4_orig_upload_event = upload_encrypted_event_to_cloud
+
+
+def upload_encrypted_event_to_cloud(event):  # noqa: F811
+    if isinstance(event, dict) \
+            and str(event.get("event_id", "")).startswith("cam_"):
+        append_block({
+            "event_id": event["event_id"],
+            "timestamp_utc": event.get("timestamp_utc")
+            or datetime.now(timezone.utc).isoformat(),
+            "device_id": event.get("device_id", "ESP32-CAM"),
+            "event_type": "INTRUSION",
+        })
+
+    return _s4_orig_upload_event(event)
+
+
+# ---- Cloudinary
+
+_s4_orig_cloud_upload = cloudinary.uploader.upload
+
+
+def _s4_cloud_upload(file, *args, **kwargs):
+    size = file.getbuffer().nbytes if hasattr(file, "getbuffer") else 0
+    pipeline_emit("cloud", "running", "Uploading ciphertext to Cloudinary...")
+
+    try:
+        result = _s4_orig_cloud_upload(file, *args, **kwargs)
+    except Exception:
+        pipeline_emit("cloud", "fail", "Cloudinary upload failed")
+        raise
+
+    name = str(result.get("public_id", "")).rsplit("/", 1)[-1]
+    pipeline_emit("cloud", "ok",
+                  f"{size} bytes of ciphertext stored as {name[:20]}...")
+
+    return result
+
+
+cloudinary.uploader.upload = _s4_cloud_upload
+
+
+# ---- Fabric
+
+_s4_orig_fabric = record_event_on_fabric
+
+
+def record_event_on_fabric(*args, **kwargs):  # noqa: F811
+    file_hash = str(kwargs.get("encrypted_file_hash") or (
+        args[2] if len(args) > 2 else ""))
+    event_id = str(kwargs.get("event_id") or (args[0] if args else ""))
+
+    run = getattr(g, "pipeline_run", None) if has_request_context() else None
+    if run is not None:
+        run["ref"] = event_id
+
+    pipeline_emit("fabric", "running", "Writing the fingerprint to Fabric...")
+
+    try:
+        result = _s4_orig_fabric(*args, **kwargs)
+    except Exception:
+        pipeline_emit("fabric", "fail", "Fabric did not accept the record")
+        raise
+
+    pipeline_emit(
+        "fabric", "ok",
+        f"Ledger holds SHA-256 {file_hash[:16]}... for {event_id[:18]}...")
+
+    return result
+
+
+# ---- Telegram: the Alert step finishes only when Telegram confirms
+
+def send_telegram_alert_async(alert_type, message):  # noqa: F811
+    run = getattr(g, "pipeline_run", None) if has_request_context() else None
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        s4_emit(run, "alert", "skipped", "Telegram is not set up on this PC")
+        return
+
+    now = time.monotonic()
+
+    with _TELEGRAM_ALERT_LOCK:
+        previous = _TELEGRAM_LAST_SENT.get(alert_type, 0.0)
+
+        if now - previous < TELEGRAM_ALERT_COOLDOWN_SECONDS:
+            s4_emit(run, "alert", "skipped",
+                    "Cooldown: a similar alert was sent a moment ago")
+            return
+
+        _TELEGRAM_LAST_SENT[alert_type] = now
+
+    s4_emit(run, "alert", "running", "Sending the alert to Telegram...")
+
+    if run is not None:
+        with S4_LOCK:
+            run["pending"] += 1
+
+    def _send():
+        started = time.time()
+
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+                "/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": message,
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+
+            if not response.json().get("ok"):
+                raise RuntimeError("not confirmed")
+
+            s4_emit(run, "alert", "ok",
+                    "Telegram confirmed delivery in "
+                    f"{int((time.time() - started) * 1000)} ms")
+
+        except Exception:
+            # Never log the URL: it contains the bot token.
+            app.logger.warning("Telegram %s alert failed.", alert_type)
+            s4_emit(run, "alert", "fail", "Telegram did not confirm")
+
+            with _TELEGRAM_ALERT_LOCK:
+                _TELEGRAM_LAST_SENT.pop(alert_type, None)
+
+        finally:
+            if run is not None:
+                with S4_LOCK:
+                    run["pending"] -= 1
+                s4_maybe_done(run)
+
+    threading.Thread(target=_send, name=f"telegram-{alert_type}",
+                     daemon=True).start()
+
+
+# ==================================================
+# DEVICE SERIAL MIRROR  (/api/device-log)
+# ==================================================
+
+_S4_TEMP = re.compile(r"Temperature:\s*(-?[\d.]+)")
+_S4_HUM = re.compile(r"Humidity:\s*([\d.]+)")
+_S4_PRED = re.compile(r"Final prediction:\s*(\w+)")
+_S4_SCORE = re.compile(
+    r"TinyML scores:\s*NORMAL=([\d.]+),\s*HIGH_HUMIDITY=([\d.]+)")
+_S4_MS = re.compile(r"Sample processing time:\s*(\d+)\s*ms")
+
+
+def _s4_log_lane(device_id, text):
+    if device_id == "ESP32-CAM":
+        return "home"
+
+    return "patient" if text.startswith("[PULSE]") else "factory"
+
+
+def _s4_parse_telemetry(lane, text):
+    if lane != "factory":
+        return
+
+    tel = S4_TELEMETRY["factory"]
+    m = _S4_TEMP.search(text)
+    if m:
+        tel["temperature"] = float(m.group(1))
+    m = _S4_HUM.search(text)
+    if m and "Quantized" not in text:
+        tel["humidity"] = float(m.group(1))
+    m = _S4_PRED.search(text)
+    if m:
+        tel["prediction"] = m.group(1)
+    m = _S4_SCORE.search(text)
+    if m:
+        tel["score_normal"] = float(m.group(1))
+        tel["score_high"] = float(m.group(2))
+    m = _S4_MS.search(text)
+    if m:
+        tel["inference_ms"] = int(m.group(1))
+    tel["t"] = time.time()
+
+
+@app.post("/api/device-log")
+@csrf.exempt
+@limiter.limit("90 per minute")
+def receive_device_log():
+    envelope = request.get_json(silent=True)
+
+    if not isinstance(envelope, dict) or any(
+            f not in envelope for f in ("device_id", "nonce",
+                                        "ciphertext", "tag")):
+        return jsonify({"error": "Incomplete log packet"}), 400
+
+    device_id = envelope["device_id"]
+
+    if device_id not in ("ESP32_01", "ESP32-CAM"):
+        return jsonify({"error": "Unknown device"}), 400
+
+    try:
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        ciphertext = base64.b64decode(envelope["ciphertext"], validate=True)
+        tag = base64.b64decode(envelope["tag"], validate=True)
+
+        if len(nonce) != 12 or len(tag) != 16 or len(ciphertext) > 16384:
+            raise ValueError("size")
+
+        if device_id == "ESP32-CAM":
+            plaintext = CAMERA_AES.decrypt(
+                nonce, ciphertext + tag, b"ESP32-CAM:LOG")
+        else:
+            plaintext = AES.decrypt(
+                nonce, ciphertext + tag, device_id.encode("utf-8"))
+
+        data = json.loads(plaintext.decode("utf-8"))
+        lines = data["lines"]
+
+        if data.get("kind") != "serial" or not isinstance(lines, list) \
+                or len(lines) > 40:
+            raise ValueError("shape")
+
+    except Exception:
+        return jsonify({"error": "Log packet failed verification"}), 400
+
+    now = time.time()
+
+    with S4_LOCK:
+        for raw in lines:
+            if not isinstance(raw, str):
+                continue
+
+            text = "".join(
+                c for c in raw if c.isprintable())[:200].strip()
+
+            if not text:
+                continue
+
+            lane = _s4_log_lane(device_id, text)
+            S4_LOG_SEQ[0] += 1
+            S4_LOGS.append({
+                "seq": S4_LOG_SEQ[0], "t": now, "lane": lane, "text": text,
+            })
+            S4_LANES[lane]["last_seen"] = now
+            _s4_parse_telemetry(lane, text)
+
+    return jsonify({"status": "ok"}), 200
+
+
+# ==================================================
+# INTEGRITY MONITOR AND ATTACK SIMULATOR
+# ==================================================
+
+S4_INTEGRITY = {
+    "state": "intact", "findings": [], "checked": 0.0,
+    "chain_blocks": 0, "cloud_checked": 0, "cloud_checked_at": 0.0,
+    "alerted": False, "since": None,
+}
+S4_HISTORY = collections.deque(maxlen=30)
+S4_ATTACK_LOG = collections.deque(maxlen=60)
+S4_ATTACK_STATE = {"chain": None, "cloud": None, "busy": False}
+S4_CLOUD_FINDINGS = {}
+S4_FORCE_CLOUD = threading.Event()
+S4_STEP_SECONDS = 1.1
+
+
+def s4_alog(actor, text):
+    with S4_LOCK:
+        S4_ATTACK_LOG.append({"t": time.time(), "actor": actor, "text": text})
+
+
+def s4_chain_check():
+    """Recompute every block. Returns (blocks, findings)."""
+
+    try:
+        with CHAIN_LOCK:
+            blocks = read_chain()
+    except Exception:
+        return 0, [{
+            "kind": "chain", "index": None,
+            "summary": "The evidence log cannot be read.",
+            "expected": "", "found": "",
+        }]
+
+    findings = []
+    previous = GENESIS_HASH
+
+    for i, block in enumerate(blocks):
+        event = block.get("event", {}) if isinstance(block, dict) else {}
+        label = (
+            event.get("prediction") or event.get("event_type") or "event")
+
+        if block.get("previous_hash") != previous:
+            findings.append({
+                "kind": "chain", "index": i,
+                "summary": (
+                    f"Block #{i} is no longer linked to block #{i - 1}. "
+                    "An earlier block was changed."),
+                "expected": str(previous),
+                "found": str(block.get("previous_hash")),
+            })
+
+        recomputed = calculate_block_hash(block)
+
+        if block.get("hash") != recomputed:
+            findings.append({
+                "kind": "chain", "index": i,
+                "summary": (
+                    f"Block #{i} ({label}) was edited. Its contents no "
+                    "longer match its fingerprint."),
+                "expected": str(block.get("hash")),
+                "found": recomputed,
+            })
+
+        previous = block.get("hash")
+
+    return len(blocks), findings[:6]
+
+
+def s4_ledger_hash(event_id):
+    """Trusted hash from Fabric, or None when it is not on the ledger."""
+
+    if not FABRIC_GATEWAY_TOKEN:
+        return None
+
+    try:
+        response = requests.get(
+            FABRIC_GATEWAY_URL.rstrip("/") + "/" + event_id,
+            headers={"Authorization": f"Bearer {FABRIC_GATEWAY_TOKEN}"},
+            timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        event = data.get("event", {})
+
+        if data.get("status") != "found" \
+                or event.get("eventId") != event_id:
+            return None
+
+        value = str(event.get("encryptedFileHash", "")).lower()
+        reference = str(event.get("cloudReference", ""))
+
+        if len(value) == 64 and reference.startswith(
+                "encrypted_iot_events/"):
+            return value, reference
+
+    except Exception:
+        return None
+
+    return None
+
+
+def s4_download(reference):
+    asset = cloudinary.api.resource(reference, resource_type="raw")
+    response = requests.get(asset["secure_url"], timeout=20)
+    response.raise_for_status()
+
+    return response.content
+
+
+def s4_cloud_scan(limit=2):
+    """Compare the newest cloud files with the hashes held on Fabric."""
+
+    checked = 0
+
+    for entry in reversed(vault_read_index()):
+        if checked >= limit:
+            break
+
+        event_id = entry.get("event_id", "")
+        ledger = s4_ledger_hash(event_id)
+
+        if ledger is None:
+            continue
+
+        expected, reference = ledger
+        checked += 1
+
+        try:
+            actual = hashlib.sha256(s4_download(reference)).hexdigest()
+        except Exception:
+            continue
+
+        if actual != expected:
+            S4_CLOUD_FINDINGS[event_id] = {
+                "kind": "cloud", "index": None,
+                "summary": (
+                    f"The encrypted evidence file {event_id[:22]}... in "
+                    "the cloud was replaced. Its fingerprint no longer "
+                    "matches the Fabric ledger."),
+                "expected": expected, "found": actual,
+            }
+        else:
+            S4_CLOUD_FINDINGS.pop(event_id, None)
+
+    S4_INTEGRITY["cloud_checked"] = checked
+    S4_INTEGRITY["cloud_checked_at"] = time.time()
+
+
+def s4_update_state():
+    blocks, chain_findings = s4_chain_check()
+
+    with S4_LOCK:
+        findings = chain_findings + list(S4_CLOUD_FINDINGS.values())
+        was = S4_INTEGRITY["state"]
+
+        S4_INTEGRITY["checked"] = time.time()
+        S4_INTEGRITY["chain_blocks"] = blocks
+        S4_INTEGRITY["findings"] = findings
+
+        if findings and was != "compromised":
+            S4_INTEGRITY["state"] = "compromised"
+            S4_INTEGRITY["since"] = time.time()
+            S4_HISTORY.append({
+                "t": time.time(), "kind": "alarm",
+                "text": findings[0]["summary"]})
+            send_alert = True
+        elif not findings and was == "compromised":
+            S4_INTEGRITY["state"] = "intact"
+            S4_HISTORY.append({
+                "t": time.time(), "kind": "ok",
+                "text": "Evidence verified again. Everything matches."})
+            send_alert = False
+            s4_alog("MONITOR", "All evidence matches its fingerprints again.")
+            send_telegram_alert_async(
+                "tamper_cleared",
+                "✅ Evidence verified again. All stored records match "
+                "their fingerprints.")
+        else:
+            send_alert = False
+
+        first = findings[0] if findings else None
+
+    if send_alert and first:
+        s4_alog("MONITOR", "ALARM: " + first["summary"])
+
+        with _TELEGRAM_ALERT_LOCK:
+            _TELEGRAM_LAST_SENT.pop("tamper_detected", None)
+
+        send_telegram_alert_async(
+            "tamper_detected",
+            "🚨 TAMPERING DETECTED\n"
+            f"{first['summary']}\n"
+            f"Expected fingerprint: {first['expected'][:16]}...\n"
+            f"Found fingerprint:    {first['found'][:16]}...\n"
+            "The stored evidence no longer matches. Open the Command "
+            "Center to review.")
+
+
+def _s4_monitor_loop():
+    last_cloud = 0.0
+
+    while True:
+        try:
+            if S4_FORCE_CLOUD.is_set() or time.time() - last_cloud > 12:
+                S4_FORCE_CLOUD.clear()
+                last_cloud = time.time()
+                s4_cloud_scan()
+
+            s4_update_state()
+        except Exception:
+            app.logger.exception("Integrity monitor error")
+
+        time.sleep(0.7)
+
+
+threading.Thread(target=_s4_monitor_loop, name="integrity-monitor",
+                 daemon=True).start()
+
+
+# ---- Attack simulator: performs REAL edits on the stored evidence
+
+def _s4_chain_lines():
+    text = CHAIN_FILE.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    blocks = []
+
+    for line_index, line in enumerate(lines):
+        if not line.strip():
+            continue
+
+        try:
+            blocks.append((line_index, json.loads(line)))
+        except ValueError:
+            continue
+
+    return lines, blocks
+
+
+def s4_attack_chain(smart):
+    s4_alog("ATTACKER", "Gained access to the server's evidence log.")
+    time.sleep(S4_STEP_SECONDS)
+
+    with CHAIN_LOCK:
+        lines, blocks = _s4_chain_lines()
+        needed = 2
+
+        if len(blocks) < needed:
+            s4_alog("SYSTEM", "Not enough chain blocks yet. Trigger a few "
+                              "events first, then try again.")
+            return
+
+        wanted = [b for b in blocks
+                  if b[1].get("event", {}).get("prediction")
+                  == "HIGH_HUMIDITY"]
+
+        if smart:
+            wanted = [b for b in wanted if b[1]["index"] < len(blocks) - 1]
+
+        target = wanted[-1] if wanted else blocks[-2]
+
+    s4_alog("ATTACKER", "Searching for a recent alert to erase...")
+    time.sleep(S4_STEP_SECONDS)
+
+    line_index, block = target
+    event = block.get("event", {})
+    original_line = lines[line_index]
+
+    if event.get("prediction") == "HIGH_HUMIDITY":
+        event["prediction"] = "NORMAL"
+        event["humidity_percent"] = 52.0
+        change = "HIGH_HUMIDITY became NORMAL (the alert is hidden)"
+    elif "event_type" in event:
+        event["event_type"] = "ROUTINE_CHECK"
+        change = "the event type was rewritten to ROUTINE_CHECK"
+    else:
+        event["device_id"] = "UNKNOWN"
+        change = "the device name was overwritten"
+
+    s4_alog("ATTACKER",
+            f"Found block #{block['index']}: {change}.")
+    time.sleep(S4_STEP_SECONDS)
+
+    if smart:
+        block["hash"] = calculate_block_hash(block)
+        s4_alog("ATTACKER", "Recalculating the block's fingerprint so it "
+                            "looks valid...")
+        time.sleep(S4_STEP_SECONDS)
+
+    with CHAIN_LOCK:
+        lines, blocks = _s4_chain_lines()
+
+        if line_index >= len(lines) or lines[line_index] != original_line:
+            s4_alog("SYSTEM", "The log changed while attacking. Try again.")
+            return
+
+        lines[line_index] = canonical_json(block)
+        CHAIN_FILE.write_text("\n".join(lines), encoding="utf-8")
+
+    with S4_LOCK:
+        S4_ATTACK_STATE["chain"] = {
+            "line_index": line_index, "original": original_line,
+            "block_index": block["index"],
+        }
+
+    s4_alog("ATTACKER", "File saved. The attacker believes nobody noticed.")
+
+
+def s4_attack_cloud():
+    s4_alog("ATTACKER", "Logged in to the cloud storage account.")
+    time.sleep(S4_STEP_SECONDS)
+
+    target = None
+
+    for entry in reversed(vault_read_index()):
+        ledger = s4_ledger_hash(entry.get("event_id", ""))
+
+        if ledger:
+            target = (entry["event_id"], ledger[1])
+            break
+
+    if target is None:
+        s4_alog("SYSTEM", "No encrypted evidence on the ledger yet. "
+                          "Trigger an event first, then try again.")
+        return
+
+    event_id, reference = target
+    s4_alog("ATTACKER", f"Found evidence file {event_id[:22]}...")
+    time.sleep(S4_STEP_SECONDS)
+
+    try:
+        original = s4_download(reference)
+        marker = b'"ciphertext_and_tag":"'
+        position = original.index(marker) + len(marker)
+        flipped = b"A" if original[position:position + 1] != b"A" else b"B"
+        tampered = original[:position] + flipped + original[position + 1:]
+    except Exception:
+        s4_alog("SYSTEM", "Could not read the evidence file. Try again.")
+        return
+
+    s4_alog("ATTACKER", "Changing one byte of the encrypted file and "
+                        "uploading it back...")
+    time.sleep(S4_STEP_SECONDS)
+
+    try:
+        cloudinary.uploader.upload(
+            io.BytesIO(tampered), resource_type="raw",
+            public_id=reference, overwrite=True, invalidate=True)
+    except Exception:
+        s4_alog("SYSTEM", "Cloud upload failed. Nothing was changed.")
+        return
+
+    with S4_LOCK:
+        S4_ATTACK_STATE["cloud"] = {
+            "reference": reference, "original": original,
+            "event_id": event_id,
+        }
+
+    s4_alog("ATTACKER", "Upload finished. The file now holds forged data.")
+    time.sleep(S4_STEP_SECONDS)
+    S4_FORCE_CLOUD.set()
+
+
+def s4_restore():
+    restored = False
+
+    with S4_LOCK:
+        chain_state = S4_ATTACK_STATE["chain"]
+        cloud_state = S4_ATTACK_STATE["cloud"]
+
+    if chain_state:
+        with CHAIN_LOCK:
+            lines, _blocks = _s4_chain_lines()
+
+            if chain_state["line_index"] < len(lines):
+                lines[chain_state["line_index"]] = chain_state["original"]
+                CHAIN_FILE.write_text("\n".join(lines), encoding="utf-8")
+                restored = True
+
+        with S4_LOCK:
+            S4_ATTACK_STATE["chain"] = None
+
+    if cloud_state:
+        try:
+            cloudinary.uploader.upload(
+                io.BytesIO(cloud_state["original"]), resource_type="raw",
+                public_id=cloud_state["reference"],
+                overwrite=True, invalidate=True)
+            restored = True
+        except Exception:
+            s4_alog("SYSTEM", "Could not restore the cloud file.")
+
+        with S4_LOCK:
+            S4_ATTACK_STATE["cloud"] = None
+            S4_CLOUD_FINDINGS.pop(cloud_state["event_id"], None)
+
+        S4_FORCE_CLOUD.set()
+
+    s4_alog("SYSTEM", "Evidence restored from the untouched copy."
+            if restored else "Nothing to restore.")
+
+
+@app.post("/api/attack/<kind>")
+@dashboard_login_required
+def s4_attack(kind):
+    if not S4_ATTACK_ENABLED:
+        return jsonify({"error": "Attack simulator is disabled."}), 403
+
+    body = request.get_json(silent=True) or {}
+
+    if body.get("confirm") != "ATTACK":
+        return jsonify({"error": "Confirmation missing."}), 400
+
+    if kind not in ("chain", "chain_smart", "cloud", "restore"):
+        return jsonify({"error": "Unknown action."}), 404
+
+    with S4_LOCK:
+        if S4_ATTACK_STATE["busy"]:
+            return jsonify({"error": "Another action is running."}), 409
+
+        S4_ATTACK_STATE["busy"] = True
+
+    def run():
+        try:
+            if kind == "chain":
+                s4_attack_chain(False)
+            elif kind == "chain_smart":
+                s4_attack_chain(True)
+            elif kind == "cloud":
+                s4_attack_cloud()
+            else:
+                s4_restore()
+        except Exception:
+            app.logger.exception("Attack simulator error")
+            s4_alog("SYSTEM", "The simulator hit an error.")
+        finally:
+            S4_ATTACK_STATE["busy"] = False
+
+    threading.Thread(target=run, name="attack-sim", daemon=True).start()
+
+    return jsonify({"started": True})
+
+
+# ==================================================
+# LIVE FEED FOR THE PAGE
+# ==================================================
+
+def _s4_health():
+    def info(key):
+        item = S4_LAST_STEP.get(key)
+
+        if not item:
+            return {"state": "idle", "age": None}
+
+        return {
+            "state": "ok" if item["status"] == "ok" else "bad",
+            "age": int(time.time() - item["t"]),
+        }
+
+    return {
+        "flask": {"state": "ok", "age": 0},
+        "chain": {
+            "state": "ok" if S4_INTEGRITY["state"] == "intact" else "bad",
+            "age": int(time.time() - S4_INTEGRITY["checked"])
+            if S4_INTEGRITY["checked"] else None,
+        },
+        "fabric": info("fabric"),
+        "cloud": info("cloud"),
+        "telegram": info("alert"),
+    }
+
+
+@app.get("/api/live")
+@dashboard_login_required
+def s4_live():
+    run_since = request.args.get("run_since", default=0, type=int)
+    log_since = request.args.get("log_since", default=0, type=int)
+    now = time.time()
+
+    with S4_LOCK:
+        runs = [
+            {k: v for k, v in run.items() if not k.startswith("_")}
+            for run in S4_RUNS
+            if run["seq"] > run_since and run["significant"]
+        ]
+
+        logs = [entry for entry in S4_LOGS if entry["seq"] > log_since]
+
+        if log_since == 0:
+            logs = logs[-80:]
+
+        integrity = {
+            "state": S4_INTEGRITY["state"],
+            "findings": list(S4_INTEGRITY["findings"]),
+            "since": S4_INTEGRITY["since"],
+            "checked_age": int(now - S4_INTEGRITY["checked"])
+            if S4_INTEGRITY["checked"] else None,
+            "chain_blocks": S4_INTEGRITY["chain_blocks"],
+            "cloud_checked": S4_INTEGRITY["cloud_checked"],
+            "cloud_age": int(now - S4_INTEGRITY["cloud_checked_at"])
+            if S4_INTEGRITY["cloud_checked_at"] else None,
+            "history": list(S4_HISTORY)[-8:],
+            "attack_log": list(S4_ATTACK_LOG)[-24:],
+            "attack_busy": S4_ATTACK_STATE["busy"],
+            "attack_enabled": S4_ATTACK_ENABLED,
+            "has_tamper": bool(
+                S4_ATTACK_STATE["chain"] or S4_ATTACK_STATE["cloud"]),
+        }
+
+        lanes = {
+            name: {
+                "count": data["count"],
+                "age": int(now - data["last_seen"])
+                if data["last_seen"] else None,
+            }
+            for name, data in S4_LANES.items()
+        }
+
+        telemetry = dict(S4_TELEMETRY["factory"])
+
+        if telemetry.get("t"):
+            telemetry["age"] = int(now - telemetry["t"])
+
+        payload = {
+            "run_seq": S4_SEQ[0],
+            "log_seq": S4_LOG_SEQ[0],
+            "now": now,
+            "runs": runs,
+            "logs": logs,
+            "integrity": integrity,
+            "lanes": lanes,
+            "telemetry": telemetry,
+            "health": _s4_health(),
+        }
+
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/pipeline")
+@dashboard_login_required
+def pipeline_page():
+    from flask_wtf.csrf import generate_csrf
+
+    return Response(
+        COMMAND_PAGE.replace("__CSRF__", generate_csrf()),
+        mimetype="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# The main dashboard must never decrypt anything: decryption lives only in
+# the authorised area.
+def _s4_no_decrypt(event_id):
+    return jsonify({
+        "error": "Decryption is only available in the authorised area."
+    }), 403
+
+
+app.view_functions["recover_verified_image"] = dashboard_login_required(
+    _s4_no_decrypt)
+COMMAND_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="csrf" content="__CSRF__">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Command Center</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#EEF0F4; --ink:#10131A; --white:#FFFFFF; --mute:#5A6372;
+  --fac:#FFB000; --home:#00C2A8; --pat:#FF3D81; --bad:#E5231B; --good:#14A44D;
+  --fac-d:#7A5400; --home-d:#00695C; --pat-d:#A3003F;
+  --disp:"Archivo",system-ui,"Segoe UI",Arial,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0}
+html{background:var(--paper)}
+body{font-family:var(--disp);font-weight:600;color:var(--ink);background:var(--paper);min-height:100vh;
+  background-image:radial-gradient(var(--ink) 1px,transparent 1.2px);background-size:26px 26px;background-position:-6px -6px}
+body::before{content:"";position:fixed;inset:0;background:var(--paper);opacity:.93;z-index:-1}
+a{color:inherit}
+.wrap{max-width:1500px;margin:0 auto;padding:16px 20px 40px}
+
+/* ---------- top bar ---------- */
+.top{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:16px}
+.brand{font-weight:900;font-stretch:112%;font-size:38px;letter-spacing:-.02em;line-height:1}
+.brand small{display:block;font-size:15px;font-weight:700;letter-spacing:0;color:var(--mute);margin-top:6px;font-stretch:100%}
+.sp{flex:1}
+.leds{display:flex;gap:8px;flex-wrap:wrap}
+.led{display:flex;align-items:center;gap:8px;background:var(--white);border:3px solid var(--ink);padding:7px 12px;font-size:16px;font-weight:800;box-shadow:4px 4px 0 var(--ink)}
+.led i{width:14px;height:14px;border-radius:50%;background:#B7BDC8;border:2px solid var(--ink);flex:none}
+.led.ok i{background:var(--good);animation:ledp 2.4s ease-in-out infinite}
+.led.bad i{background:var(--bad);animation:ledb .6s steps(2) infinite}
+.led small{font-size:13px;font-weight:700;color:var(--mute);font-family:var(--mono)}
+@keyframes ledp{50%{box-shadow:0 0 0 5px rgba(20,164,77,.25)}}
+@keyframes ledb{50%{opacity:.25}}
+.btn{font:800 16px var(--disp);background:var(--white);border:3px solid var(--ink);padding:9px 14px;cursor:pointer;box-shadow:4px 4px 0 var(--ink);color:var(--ink);text-decoration:none;display:inline-block}
+.btn:hover{transform:translate(2px,2px);box-shadow:2px 2px 0 var(--ink)}
+.btn:active{transform:translate(4px,4px);box-shadow:0 0 0 var(--ink)}
+.btn:focus-visible,.tab:focus-visible{outline:4px solid var(--pat);outline-offset:2px}
+.btn[disabled]{opacity:.4;pointer-events:none}
+
+/* ---------- lanes ---------- */
+.lane{--c:var(--fac);--cd:var(--fac-d);background:var(--white);border:4px solid var(--ink);box-shadow:8px 8px 0 var(--ink);margin-bottom:22px;display:grid;grid-template-columns:270px 1fr;position:relative}
+.lane.home{--c:var(--home);--cd:var(--home-d)}
+.lane.patient{--c:var(--pat);--cd:var(--pat-d)}
+.lhead{background:var(--c);border-right:4px solid var(--ink);padding:16px 18px;display:flex;flex-direction:column;gap:8px}
+.lhead h2{font-size:34px;font-weight:900;font-stretch:105%;line-height:1;letter-spacing:-.02em}
+.lhead .dev{font-size:17px;font-weight:800}
+.pill{align-self:flex-start;font:800 15px var(--disp);background:var(--ink);color:var(--white);padding:5px 10px;display:inline-flex;gap:8px;align-items:center}
+.pill i{width:10px;height:10px;border-radius:50%;background:#7a8394}
+.pill.live i{background:#3DFF8A;animation:ledp 1.6s infinite}
+.lhead .cnt{margin-top:auto;font-size:15px;font-weight:800}
+.lhead .cnt b{font-size:56px;font-weight:900;font-stretch:100%;display:block;line-height:1}
+.lbody{padding:16px 20px 18px;min-width:0}
+.meta{display:flex;flex-wrap:wrap;gap:6px 22px;font-family:var(--mono);font-size:15px;font-weight:700;margin-bottom:14px;min-height:22px}
+.meta b{background:var(--ink);color:var(--white);padding:1px 7px}
+.idle-msg{font-size:24px;font-weight:800}
+
+.track{position:relative;display:grid;grid-template-columns:repeat(7,1fr);gap:0;margin:6px 0 10px}
+.track::before{content:"";position:absolute;left:7%;right:7%;top:37px;height:8px;background:repeating-linear-gradient(90deg,var(--ink) 0 10px,transparent 10px 20px);opacity:.25}
+.lane.waiting .track::before{animation:march 1.1s linear infinite}
+@keyframes march{to{background-position:20px 0}}
+.fill{position:absolute;left:7%;top:37px;height:8px;background:var(--ink);width:0;transition:width .35s cubic-bezier(.2,.9,.2,1)}
+.fill::after{content:"";position:absolute;right:-9px;top:-5px;width:18px;height:18px;background:var(--c);border:3px solid var(--ink);border-radius:50%;opacity:0}
+.lane.live .fill::after{opacity:1;animation:headp .7s ease-in-out infinite alternate}
+@keyframes headp{to{transform:scale(1.35)}}
+.st{position:relative;text-align:center;padding:0 4px;z-index:1}
+.node{width:82px;height:82px;margin:0 auto;border:4px solid var(--ink);background:var(--white);display:grid;place-items:center;font-size:36px;font-weight:900;transition:background .15s}
+.st .nm{margin-top:10px;font-size:19px;font-weight:900;line-height:1.1}
+.st .sub{font-size:14px;font-weight:700;color:var(--mute);margin-top:2px;font-family:var(--mono);min-height:18px}
+.st.running .node{background:repeating-linear-gradient(-45deg,var(--c) 0 10px,var(--white) 10px 20px);animation:stripe .6s linear infinite}
+@keyframes stripe{to{background-position:28px 0}}
+.st.ok .node{background:var(--c);animation:stamp .42s cubic-bezier(.2,1.8,.4,1)}
+@keyframes stamp{0%{transform:scale(1.35) rotate(-6deg)}100%{transform:none}}
+.st.ok .node::after{content:"\2713"}
+.st.fail .node{background:var(--bad);color:var(--white);animation:shake .4s}
+.st.fail .node::after{content:"\2715"}
+.st.skipped .node{background:repeating-linear-gradient(45deg,#D5D9E0 0 6px,var(--white) 6px 12px);color:var(--mute)}
+.st.skipped .node::after{content:"\2013"}
+.st.running .node::after{content:""}
+@keyframes shake{25%{transform:translateX(-7px)}75%{transform:translateX(7px)}}
+.lane.flash{animation:laneflash .9s ease-out}
+@keyframes laneflash{0%{box-shadow:0 0 0 0 var(--c),8px 8px 0 var(--ink)}40%{box-shadow:0 0 0 14px var(--c),8px 8px 0 var(--ink)}100%{box-shadow:0 0 0 0 transparent,8px 8px 0 var(--ink)}}
+
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:4px 26px;margin-top:8px;border-top:3px solid var(--ink);padding-top:10px}
+.steps div{font-size:17px;font-weight:700;line-height:1.3;display:flex;gap:10px}
+.steps b{font-family:var(--mono);font-size:14px;background:var(--c);border:2px solid var(--ink);padding:0 6px;height:24px;flex:none;font-weight:800;white-space:nowrap}
+.steps .bad{color:var(--bad)}
+.hist{display:flex;gap:6px;margin-top:12px;align-items:center;font-size:15px;font-weight:800;flex-wrap:wrap}
+.hist span.h{width:26px;height:26px;border:3px solid var(--ink);background:var(--c);cursor:pointer}
+.hist span.h.f{background:var(--bad)}
+.hist span.h.sel{outline:4px solid var(--ink);outline-offset:2px}
+
+.tele{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
+.tele .big{font-size:64px;font-weight:900;font-stretch:100%;line-height:.9;letter-spacing:-.03em}
+.tele .big small{font-size:24px;font-weight:800}
+.tele .lbl{font-size:16px;font-weight:800;color:var(--mute)}
+.bars{display:flex;flex-direction:column;gap:6px;min-width:260px;flex:1;max-width:420px}
+.bar{display:grid;grid-template-columns:130px 1fr 56px;align-items:center;gap:8px;font-size:16px;font-weight:800}
+.bar div{height:20px;border:3px solid var(--ink);background:var(--white)}
+.bar div i{display:block;height:100%;background:var(--c);width:0;transition:width .4s}
+.bar span{font-family:var(--mono);font-size:15px;text-align:right}
+
+/* ---------- lower grid ---------- */
+.low{display:grid;grid-template-columns:1.15fr 1fr;gap:22px;align-items:start}
+.panel{background:var(--white);border:4px solid var(--ink);box-shadow:8px 8px 0 var(--ink);min-width:0}
+.panel>h3{font-size:26px;font-weight:900;padding:10px 16px;border-bottom:4px solid var(--ink);font-stretch:105%;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.panel>h3 .sp{flex:1}
+.tabs{display:flex;gap:6px}
+.tab{font:800 15px var(--disp);border:3px solid var(--ink);background:var(--white);padding:3px 10px;cursor:pointer;color:var(--ink)}
+.tab.on{background:var(--ink);color:var(--white)}
+.console{background:var(--ink);color:#E8ECF4;font-family:var(--mono);font-size:16px;font-weight:700;height:430px;overflow-y:auto;padding:12px 14px;line-height:1.45}
+.console .ln{display:grid;grid-template-columns:78px 54px 1fr;gap:8px;padding:1px 0;animation:lnin .25s ease-out}
+@keyframes lnin{from{background:rgba(255,255,255,.3)}}
+.console .tm{color:#7C879B}
+.console .tg{font-weight:800;text-align:center;color:var(--ink);padding:0 4px;height:22px;align-self:center;font-size:13px;line-height:22px}
+.console .tg.factory{background:var(--fac)}.console .tg.home{background:var(--home)}.console .tg.patient{background:var(--pat)}
+.console .hot{color:#FFE066}.console .err{color:#FF7B72}.console .good{color:#6CF2A6}
+.console .empty{color:#7C879B;font-size:18px;padding:18px 4px}
+.cur{display:inline-block;width:10px;height:18px;background:#E8ECF4;vertical-align:-3px;animation:ledb 1s steps(2) infinite}
+
+.integ{padding:16px}
+.verdict{border:4px solid var(--ink);padding:14px 16px;display:flex;align-items:center;gap:16px;background:#D9F7E5}
+.verdict .ic{width:56px;height:56px;border:4px solid var(--ink);background:var(--good);color:#fff;display:grid;place-items:center;font-size:34px;font-weight:900;flex:none}
+.verdict h4{font-size:34px;font-weight:900;font-stretch:105%;line-height:1}
+.verdict p{font-size:16px;font-weight:700;margin-top:4px}
+body.alarm .verdict{background:var(--bad);color:#fff}
+body.alarm .verdict .ic{background:#fff;color:var(--bad);animation:ledb .5s steps(2) infinite}
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+.fact{border:3px solid var(--ink);padding:8px 10px}
+.fact b{font-size:34px;font-weight:900;display:block;line-height:1}
+.fact span{font-size:14px;font-weight:800;color:var(--mute)}
+.find{border:4px solid var(--bad);background:#FFF1F0;padding:12px 14px;margin-bottom:12px}
+.find p{font-size:18px;font-weight:800;line-height:1.3;margin-bottom:8px}
+.hash{font-family:var(--mono);font-size:14px;font-weight:700;word-break:break-all;margin-top:4px;line-height:1.5}
+.hash em{font-style:normal;background:var(--bad);color:#fff}
+.hash span{display:inline-block;width:92px;color:var(--mute)}
+.sim{border-top:4px solid var(--ink);padding-top:14px;margin-top:6px}
+.sim h4{font-size:20px;font-weight:900;margin-bottom:4px}
+.sim p{font-size:15px;color:var(--mute);margin-bottom:10px;font-weight:700;line-height:1.35}
+.arm{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:800;margin-bottom:10px;cursor:pointer;user-select:none}
+.arm input{width:24px;height:24px;accent-color:var(--bad)}
+.sbtns{display:flex;flex-wrap:wrap;gap:12px}
+.btn.atk{background:var(--bad);color:#fff}
+.btn.rst{background:var(--good);color:#fff}
+.alog{background:var(--ink);color:#E8ECF4;font-family:var(--mono);font-size:15px;font-weight:700;padding:10px 12px;margin-top:12px;max-height:190px;overflow-y:auto;min-height:60px}
+.alog .a{color:#FF7B72}.alog .m{color:#FFE066}.alog .s{color:#6CF2A6}
+.alog div{padding:1px 0}
+
+/* ---------- alarm ---------- */
+.tape{position:fixed;left:0;right:0;top:0;height:0;overflow:hidden;z-index:50;background:repeating-linear-gradient(-45deg,var(--bad) 0 24px,#10131A 24px 48px);transition:height .25s}
+body.alarm .tape{height:78px}
+.tape div{position:absolute;inset:10px 0;background:var(--bad);color:#fff;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:900;font-stretch:112%;letter-spacing:.01em;border-top:4px solid var(--ink);border-bottom:4px solid var(--ink);white-space:nowrap;overflow:hidden}
+body.alarm .wrap{padding-top:96px}
+body.shake .wrap{animation:bigshake .5s}
+@keyframes bigshake{20%{transform:translate(-8px,3px)}40%{transform:translate(8px,-3px)}60%{transform:translate(-5px,2px)}80%{transform:translate(5px,-2px)}}
+body.alarm{background-color:#FFD9D6}
+body.alarm::before{background:#FFD9D6;opacity:.9}
+
+.hint{font-size:15px;font-weight:700;color:var(--mute);margin-top:6px}
+@media(max-width:1100px){.low{grid-template-columns:1fr}.lane{grid-template-columns:1fr}.lhead{border-right:0;border-bottom:4px solid var(--ink)}.node{width:60px;height:60px;font-size:26px}.track::before,.fill{top:27px}.st .nm{font-size:15px}.st .sub{display:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="tape" aria-live="assertive"><div id="tapeText">TAMPERING DETECTED</div></div>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">Command Center<small>Privacy-preserving edge AI for secure IoT</small></div>
+    <div class="sp"></div>
+    <div class="leds" id="leds"></div>
+    <button class="btn" id="snd" type="button">Sound off</button>
+    <a class="btn" href="/">Dashboard</a>
+  </div>
+
+  <div id="lanes"></div>
+
+  <div class="low">
+    <section class="panel">
+      <h3>Device console
+        <span class="tabs" id="ctabs">
+          <button class="tab on" data-f="all" type="button">All</button>
+          <button class="tab" data-f="factory" type="button">Factory</button>
+          <button class="tab" data-f="home" type="button">Home</button>
+        </span>
+        <span class="sp"></span>
+        <span style="font-size:15px;font-weight:700;color:var(--mute)">What the devices print, live</span>
+      </h3>
+      <div class="console" id="console"><div class="empty">Waiting for the devices. Lines appear here the moment they are printed.<span class="cur"></span></div></div>
+    </section>
+
+    <section class="panel">
+      <h3>Evidence integrity</h3>
+      <div class="integ">
+        <div class="verdict" id="verdict">
+          <div class="ic" id="vic">&#10003;</div>
+          <div><h4 id="vt">Evidence intact</h4><p id="vp">Checking every stored record...</p></div>
+        </div>
+        <div class="facts">
+          <div class="fact"><b id="fBlocks">0</b><span>chain blocks verified</span></div>
+          <div class="fact"><b id="fCloud">0</b><span>cloud files matched to ledger</span></div>
+          <div class="fact"><b id="fAge">-</b><span>seconds since last check</span></div>
+        </div>
+        <div id="findings"></div>
+        <div class="sim" id="sim">
+          <h4>Attacker simulator</h4>
+          <p>Edits the real stored evidence, exactly as an intruder with file access would. The monitor above must catch it and send a Telegram alert.</p>
+          <label class="arm"><input type="checkbox" id="armed"> I am demonstrating. Allow the simulated attack.</label>
+          <div class="sbtns">
+            <button class="btn atk" data-a="chain" type="button" disabled>Hide an alert in the log</button>
+            <button class="btn atk" data-a="chain_smart" type="button" disabled>Edit and re-seal the block</button>
+            <button class="btn atk" data-a="cloud" type="button" disabled>Replace a cloud file</button>
+            <button class="btn rst" data-a="restore" type="button" disabled>Restore the evidence</button>
+          </div>
+          <div class="alog" id="alog"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var STEPS=[["received","Received","IN"],["decrypt","Decrypt","KEY"],["chain","Chain","#"],["encrypt_cloud","Re-encrypt","LOCK"],["cloud","Cloud","UP"],["fabric","Ledger","LEDGER"],["alert","Alert","TG"]];
+var LANES=[
+ {id:"factory",title:"Factory",dev:"ESP32 + DHT11 humidity node",what:"High humidity"},
+ {id:"home",title:"Home",dev:"ESP32-CAM person detector",what:"Person detected"},
+ {id:"patient",title:"Patient",dev:"HW-627 pulse sensor",what:"Heart-rate anomaly"}
+];
+var runSeq=0,logSeq=0,sound=false,audio=null,alarm=false,filter="all";
+var state={};  // lane -> {runs:[], sel:id}
+LANES.forEach(function(l){state[l.id]={runs:[],sel:null,lastSeq:0,age:null,count:0}});
+
+function $(i){return document.getElementById(i)}
+function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+
+/* build lanes */
+var lanesBox=$("lanes");
+LANES.forEach(function(l){
+  var s=el("section","lane waiting "+l.id);s.id="lane-"+l.id;
+  var h=el("div","lhead");
+  h.appendChild(el("h2","",l.title));
+  h.appendChild(el("div","dev",l.dev));
+  var p=el("div","pill");p.id="pill-"+l.id;p.appendChild(el("i"));p.appendChild(el("span","","Offline"));h.appendChild(p);
+  var c=el("div","cnt");c.appendChild(el("b","","0"));c.lastChild.id="cnt-"+l.id;c.appendChild(document.createTextNode(l.what+" events"));h.appendChild(c);
+  s.appendChild(h);
+  var b=el("div","lbody");
+  if(l.id==="factory"){
+    var t=el("div","tele");t.id="tele";
+    t.innerHTML='<div><div class="lbl">Humidity</div><div class="big" id="tHum">--<small>%</small></div></div><div><div class="lbl">Temperature</div><div class="big" id="tTemp">--<small>&deg;C</small></div></div><div class="bars"><div class="bar"><span style="text-align:left">Normal</span><div><i id="bN"></i></div><span id="bNv">--</span></div><div class="bar"><span style="text-align:left">High humidity</span><div><i id="bH" style="background:var(--bad)"></i></div><span id="bHv">--</span></div><div class="lbl" id="tInf">TinyML on the ESP32, waiting for a reading</div></div>';
+    b.appendChild(t);
+  }
+  var m=el("div","meta");m.id="meta-"+l.id;b.appendChild(m);
+  var tr=el("div","track");tr.id="track-"+l.id;
+  var f=el("div","fill");f.id="fill-"+l.id;tr.appendChild(f);
+  STEPS.forEach(function(st,i){
+    var d=el("div","st");d.id="st-"+l.id+"-"+st[0];
+    var n=el("div","node");d.appendChild(n);
+    d.appendChild(el("div","nm",st[1]));
+    var sb=el("div","sub","");sb.id="sub-"+l.id+"-"+st[0];d.appendChild(sb);
+    tr.appendChild(d);
+  });
+  b.appendChild(tr);
+  var sd=el("div","steps");sd.id="steps-"+l.id;b.appendChild(sd);
+  var hi=el("div","hist");hi.id="hist-"+l.id;b.appendChild(hi);
+  s.appendChild(b);lanesBox.appendChild(s);
+});
+
+/* ---------- rendering ---------- */
+function fmtTime(iso){try{return new Date(iso).toLocaleTimeString([], {hour12:false})}catch(e){return ""}}
+function render(laneId){
+  var S=state[laneId],lane=$("lane-"+laneId);
+  var run=null;
+  for(var i=0;i<S.runs.length;i++){if(S.runs[i].id===S.sel)run=S.runs[i]}
+  if(!run&&S.runs.length)run=S.runs[S.runs.length-1];
+  var meta=$("meta-"+laneId),steps=$("steps-"+laneId),fill=$("fill-"+laneId);
+  var info=null;LANES.forEach(function(l){if(l.id===laneId)info=l});
+  STEPS.forEach(function(st){
+    var d=$("st-"+laneId+"-"+st[0]);d.className="st";$("sub-"+laneId+"-"+st[0]).textContent="";
+  });
+  meta.textContent="";steps.textContent="";
+  if(!run){
+    lane.classList.add("waiting");lane.classList.remove("live");fill.style.width="0";
+    var w=el("div","idle-msg","Armed and watching. The next "+info.what.toLowerCase()+" appears here the moment it happens.");
+    meta.appendChild(w);return;
+  }
+  lane.classList.remove("waiting");
+  var byKey={},last=-1,live=!run.done;
+  run.steps.forEach(function(s){byKey[s.key]=s});
+  STEPS.forEach(function(st,i){
+    var s=byKey[st[0]];if(!s)return;
+    var d=$("st-"+laneId+"-"+st[0]);d.className="st "+s.status;
+    $("sub-"+laneId+"-"+st[0]).textContent=s.status==="running"?"working":(s.t_ms+" ms");
+    if(s.status!=="running")last=i;else last=Math.max(last,i-0.5);
+  });
+  var frac=last<0?0:Math.min(1,(last+0.5)/6.5);
+  fill.style.width="calc((100% - 14%) * "+Math.min(1,Math.max(0,last)/6)+")";
+  lane.classList.toggle("live",live);
+  [["Event",run.id],["From",run.src],["Time",fmtTime(run.started_utc)],["Reply",run.http||"..."],["Total",run.total_ms!=null?run.total_ms+" ms":"running"]].forEach(function(p){
+    var sp=el("span","");sp.appendChild(el("b","",p[0]));sp.appendChild(document.createTextNode(" "+p[1]));meta.appendChild(sp)});
+  if(run.ref){var sp=el("span","");sp.appendChild(el("b","","Ledger ID"));sp.appendChild(document.createTextNode(" "+run.ref));meta.appendChild(sp)}
+  run.steps.forEach(function(s){
+    var d=el("div",s.status==="fail"?"bad":"");
+    var nm="";STEPS.forEach(function(st){if(st[0]===s.key)nm=st[1]});
+    d.appendChild(el("b","",nm));d.appendChild(el("span","",s.detail||s.status));steps.appendChild(d);
+  });
+  /* history */
+  var hi=$("hist-"+laneId);hi.textContent="";
+  if(S.runs.length>1){
+    hi.appendChild(el("span","","Earlier:"));
+    S.runs.slice(-12).forEach(function(r){
+      var fail=r.steps.some(function(s){return s.status==="fail"});
+      var h=el("span","h"+(fail?" f":"")+(r.id===run.id?" sel":""));
+      h.title=fmtTime(r.started_utc)+" "+r.id;
+      h.addEventListener("click",function(){S.sel=r.id;render(laneId)});
+      hi.appendChild(h);
+    });
+    var latest=el("span","btn","Latest");latest.style.cssText="padding:2px 8px;font-size:14px;box-shadow:2px 2px 0 var(--ink)";
+    latest.addEventListener("click",function(){S.sel=null;render(laneId)});hi.appendChild(latest);
+  }
+}
+
+function ingestRuns(runs){
+  runs.forEach(function(r){
+    var S=state[r.lane];if(!S)return;
+    var found=false,prev=null;
+    for(var i=0;i<S.runs.length;i++){if(S.runs[i].id===r.id){prev=S.runs[i];S.runs[i]=r;found=true}}
+    if(!found){S.runs.push(r);if(S.runs.length>30)S.runs.shift();S.sel=null}
+    /* sound + flash when a step finishes */
+    var oldAlert=prev?stat(prev,"alert"):"";
+    var newAlert=stat(r,"alert");
+    if(newAlert==="ok"&&oldAlert!=="ok"){flash(r.lane);beep(880,.18)}
+    if(stat(r,"fabric")==="ok"&&(!prev||stat(prev,"fabric")!=="ok")){flash(r.lane)}
+    var fail=r.steps.some(function(s){return s.status==="fail"});
+    if(fail&&(!prev||!prev.steps.some(function(s){return s.status==="fail"})))beep(180,.3);
+    if(S.sel==null||S.sel===r.id)render(r.lane);else render(r.lane);
+  });
+}
+function stat(r,k){for(var i=0;i<r.steps.length;i++)if(r.steps[i].key===k)return r.steps[i].status;return ""}
+function flash(l){var e=$("lane-"+l);e.classList.remove("flash");void e.offsetWidth;e.classList.add("flash")}
+
+/* ---------- console ---------- */
+var cons=$("console"),consLines=[];
+function addLogs(logs){
+  if(!logs.length)return;
+  if(!consLines.length)cons.textContent="";
+  var atEnd=cons.scrollTop+cons.clientHeight>=cons.scrollHeight-40;
+  logs.forEach(function(L){
+    consLines.push(L);
+    var d=new Date(L.t*1000),r=el("div","ln");r.dataset.lane=L.lane;
+    r.appendChild(el("span","tm",d.toLocaleTimeString([], {hour12:false})));
+    r.appendChild(el("span","tg "+L.lane,L.lane==="factory"?"FAC":L.lane==="home"?"CAM":"PUL"));
+    var t=el("span","",L.text);
+    if(/ANOMALY|HIGH_HUMIDITY|PERSON|INTRUSION|detected|alert/i.test(L.text)&&!/no person|not detected/i.test(L.text))t.className="hot";
+    if(/fail|error|timeout|refused|invalid/i.test(L.text))t.className="err";
+    if(/success|uploaded|sent|connected|ready|ok\b/i.test(L.text))t.className="good";
+    r.appendChild(t);
+    if(filter!=="all"&&filter!==L.lane)r.style.display="none";
+    cons.appendChild(r);
+  });
+  while(cons.children.length>400)cons.removeChild(cons.firstChild);
+  if(atEnd)cons.scrollTop=cons.scrollHeight;
+}
+$("ctabs").addEventListener("click",function(e){
+  var b=e.target.closest(".tab");if(!b)return;filter=b.dataset.f;
+  Array.prototype.forEach.call($("ctabs").children,function(x){x.classList.toggle("on",x===b)});
+  Array.prototype.forEach.call(cons.children,function(r){if(r.dataset&&r.dataset.lane)r.style.display=(filter==="all"||filter===r.dataset.lane)?"":"none"});
+  cons.scrollTop=cons.scrollHeight;
+});
+
+/* ---------- health + lanes + telemetry ---------- */
+function setLeds(h){
+  var names=[["flask","Server"],["chain","Hash chain"],["fabric","Fabric"],["cloud","Cloud"],["telegram","Telegram"]];
+  var box=$("leds");box.textContent="";
+  names.forEach(function(n){
+    var x=h[n[0]]||{state:"idle"};
+    var d=el("div","led "+(x.state==="ok"?"ok":x.state==="bad"?"bad":""));
+    d.appendChild(el("i"));d.appendChild(document.createTextNode(n[1]));
+    box.appendChild(d);
+  });
+}
+function setLanes(l){
+  LANES.forEach(function(L){
+    var d=l[L.id]||{};var pill=$("pill-"+L.id);
+    var live=d.age!=null&&d.age<30;
+    pill.className="pill"+(live?" live":"");
+    pill.lastChild.textContent=d.age==null?"No signal yet":live?"Online, "+d.age+" s ago":"Quiet for "+d.age+" s";
+    var c=$("cnt-"+L.id);if(c.textContent!==String(d.count))c.textContent=d.count||0;
+  });
+}
+function setTele(t){
+  if(!t||t.humidity==null)return;
+  $("tHum").firstChild.nodeValue=t.humidity.toFixed(1);
+  if(t.temperature!=null)$("tTemp").firstChild.nodeValue=t.temperature.toFixed(1);
+  if(t.score_normal!=null){
+    $("bN").style.width=(t.score_normal*100)+"%";$("bNv").textContent=Math.round(t.score_normal*100)+"%";
+    $("bH").style.width=(t.score_high*100)+"%";$("bHv").textContent=Math.round(t.score_high*100)+"%";
+  }
+  $("tInf").textContent="TinyML on the ESP32: "+(t.prediction||"-")+(t.inference_ms!=null?", decided in "+t.inference_ms+" ms":"");
+}
+
+/* ---------- integrity ---------- */
+function diffHash(a,b){
+  var out=document.createDocumentFragment();
+  for(var i=0;i<Math.min(a.length,64);i++){
+    var ch=a[i];if(b&&b[i]!==ch){var m=el("em","",ch);out.appendChild(m)}else out.appendChild(document.createTextNode(ch));
+  }
+  return out;
+}
+function setIntegrity(I){
+  var bad=I.state==="compromised";
+  if(bad!==alarm){
+    alarm=bad;document.body.classList.toggle("alarm",bad);
+    $("vt").textContent=bad?"Tampering detected":"Evidence intact";
+    $("vic").textContent=bad?"!":"✓";
+    if(bad){document.body.classList.add("shake");setTimeout(function(){document.body.classList.remove("shake")},600);siren()}
+  }
+  $("vp").textContent=bad?"Stored data no longer matches its fingerprints. Alert sent to Telegram.":"Every record matches its fingerprint and the ledger.";
+  $("fBlocks").textContent=I.chain_blocks;$("fCloud").textContent=I.cloud_checked;
+  $("fAge").textContent=I.checked_age==null?"-":I.checked_age;
+  var f=$("findings");f.textContent="";
+  (I.findings||[]).forEach(function(x){
+    var b=el("div","find");b.appendChild(el("p","",x.summary));
+    var e=el("div","hash");e.appendChild(el("span","","Should be"));e.appendChild(document.createTextNode(x.expected));b.appendChild(e);
+    var g=el("div","hash");g.appendChild(el("span","","Found"));g.appendChild(diffHash(x.found,x.expected));b.appendChild(g);
+    f.appendChild(b);
+  });
+  var log=$("alog");log.textContent="";
+  (I.attack_log||[]).forEach(function(a){
+    var d=el("div",a.actor==="ATTACKER"?"a":a.actor==="MONITOR"?"m":"s");
+    d.textContent=new Date(a.t*1000).toLocaleTimeString([], {hour12:false})+"  "+a.actor+": "+a.text;log.appendChild(d)});
+  log.scrollTop=log.scrollHeight;
+  var armed=$("armed").checked&&!I.attack_busy&&I.attack_enabled;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-a]"),function(b){
+    var rst=b.dataset.a==="restore";b.disabled=!armed||(rst&&!I.has_tamper&&!bad)});
+  $("sim").style.display=I.attack_enabled?"":"none";
+}
+$("armed").addEventListener("change",function(){poll()});
+document.querySelector(".sbtns").addEventListener("click",function(e){
+  var b=e.target.closest("[data-a]");if(!b||b.disabled)return;
+  fetch("/api/attack/"+b.dataset.a,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json","X-CSRFToken":document.querySelector("meta[name=csrf]").content},body:JSON.stringify({confirm:"ATTACK"})}).then(function(){poll()});
+});
+
+/* ---------- sound ---------- */
+function ctx(){if(!audio){try{audio=new (window.AudioContext||window.webkitAudioContext)()}catch(e){}}return audio}
+function beep(f,d){if(!sound)return;var a=ctx();if(!a)return;var o=a.createOscillator(),g=a.createGain();o.frequency.value=f;o.type="square";g.gain.value=.06;o.connect(g);g.connect(a.destination);o.start();o.stop(a.currentTime+d)}
+function siren(){beep(520,.25);setTimeout(function(){beep(380,.25)},280);setTimeout(function(){beep(520,.25)},560)}
+$("snd").addEventListener("click",function(){sound=!sound;this.textContent=sound?"Sound on":"Sound off";if(sound){ctx();if(audio&&audio.resume)audio.resume();beep(660,.12)}});
+
+/* ---------- polling ---------- */
+var busy=false,first=true;
+function poll(){
+  if(busy)return;busy=true;
+  fetch("/api/live?run_since="+runSeq+"&log_since="+logSeq,{credentials:"same-origin",cache:"no-store"})
+  .then(function(r){if(r.status===401||r.redirected){location.href="/login";throw 0}return r.json()})
+  .then(function(d){
+    if(first&&d.runs.length){d.runs.sort(function(a,b){return a.seq-b.seq})}
+    runSeq=d.run_seq;logSeq=d.log_seq;
+    ingestRuns(d.runs);addLogs(d.logs);setLeds(d.health);setLanes(d.lanes);setTele(d.telemetry);setIntegrity(d.integrity);
+    if(first){first=false;LANES.forEach(function(l){render(l.id)})}
+  }).catch(function(){}).then(function(){busy=false});
+}
+LANES.forEach(function(l){render(l.id)});
+poll();setInterval(poll,400);
+})();
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False,
+    )

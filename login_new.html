@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure IoT | Sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=VT323&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#020804;--g:#39ff6a;--g2:#1fb84a;--gd:#0f5a27;--red:#ff4d4d;--amber:#ffd24a;--txt:#c9ffd8;
+ --mono:"IBM Plex Mono",ui-monospace,Consolas,"Courier New",monospace;--pix:"VT323","IBM Plex Mono",Consolas,monospace}
+*{box-sizing:border-box;margin:0}
+html{background:var(--bg)}
+body{background:var(--bg);color:var(--g);font:600 18px/1.5 var(--mono);min-height:100vh;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:60;
+ background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px),radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.7) 100%)}
+body::after{content:"";position:fixed;left:0;right:0;height:140px;top:-140px;pointer-events:none;z-index:59;background:linear-gradient(180deg,transparent,rgba(57,255,106,.07),transparent);animation:sweep 7s linear infinite}
+@keyframes sweep{to{top:100%}}
+.wrap{max-width:1300px;margin:0 auto;padding:0 clamp(14px,3vw,40px) 30px;min-height:100vh;display:flex;flex-direction:column}
+.ticker{display:flex;justify-content:space-between;gap:20px;font-size:15px;color:var(--g2);padding:12px 0 6px;white-space:nowrap;overflow:hidden}
+.rule2{border:0;border-top:3px solid var(--g)}.rule1{border:0;border-top:1px dashed var(--g2)}
+.main{flex:1;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(320px,480px);gap:30px 56px;align-items:center;padding:30px 0}
+.left h1{font:400 clamp(60px,8vw,118px)/.88 var(--pix);letter-spacing:.04em;text-shadow:0 0 16px rgba(57,255,106,.6);margin:8px 0 16px}
+.left h1 span{animation:glt 5s steps(1) infinite;display:inline-block}
+@keyframes glt{0%,93%,100%{transform:none;text-shadow:0 0 16px rgba(57,255,106,.6)}94%{transform:translate(-5px,0);text-shadow:4px 0 var(--red),-4px 0 #4df}96%{transform:translate(6px,1px)}}
+.sub{font-size:clamp(18px,2vw,23px);color:var(--txt);max-width:34ch;margin-bottom:18px}
+canvas#eye{width:100%;max-width:520px;height:auto;display:block;filter:drop-shadow(0 0 6px rgba(57,255,106,.5))}
+.meta{margin-top:14px;font-size:16px;color:var(--g2);line-height:1.6}
+.meta b{color:var(--g)}
+.term{border:3px solid var(--g);padding:26px 26px 24px;position:relative;background:rgba(57,255,106,.03)}
+.term::before{content:"";position:absolute;inset:5px;border:1px solid var(--gd);pointer-events:none}
+.term h2{font:400 40px/1 var(--pix);letter-spacing:.04em;margin-bottom:6px}
+.term p.l{color:var(--g2);font-size:17px;margin-bottom:20px}
+label{display:block;font-size:19px;font-weight:700;margin-bottom:8px}
+.prompt{display:flex;align-items:center;gap:10px;border:2px solid var(--g);padding:0 12px;background:#000}
+.prompt:focus-within{box-shadow:0 0 0 3px var(--amber)}
+.prompt i{font-style:normal;color:var(--g2);font-size:22px}
+input{flex:1;min-width:0;font:700 22px var(--mono);letter-spacing:.12em;background:transparent;border:0;color:var(--g);padding:14px 0;outline:none;caret-color:var(--g)}
+input::placeholder{color:var(--gd);letter-spacing:.2em}
+button{width:100%;margin-top:20px;font:700 21px var(--mono);letter-spacing:.06em;color:var(--bg);background:var(--g);border:2px solid var(--g);padding:14px;cursor:pointer}
+button:hover{background:var(--txt)}
+button:focus-visible{outline:3px solid var(--amber);outline-offset:3px}
+.err{border:3px solid var(--red);color:var(--red);padding:10px 14px;margin-bottom:18px;font-size:19px;font-weight:700;animation:shake .45s}
+.err b{display:block;font:400 34px/1 var(--pix);letter-spacing:.05em}
+@keyframes shake{25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+.note{margin-top:18px;font-size:15px;color:var(--g2);line-height:1.5}
+.foot{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:15px;color:var(--g2);padding-top:10px}
+.hazard{height:14px;background:repeating-linear-gradient(135deg,var(--g) 0 8px,transparent 8px 16px);border-top:2px solid var(--g);border-bottom:2px solid var(--g);margin-bottom:10px}
+@media(max-width:900px){.main{grid-template-columns:1fr}canvas#eye{max-width:360px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="ticker"><span>SECURE-IOT(EDGE) 2026</span><span id="clk">--:--:--</span><span>ACCESS CONTROL</span><span>PORT.....5000</span></div>
+  <hr class="rule2">
+  <main class="main">
+    <section class="left" aria-hidden="false">
+      <h1><span>SECURE<br>IOT</span></h1>
+      <p class="sub">Privacy-preserving edge AI. Sign in to see protected sensor events.</p>
+      <canvas id="eye" width="520" height="300" aria-label="Watching eye graphic"></canvas>
+      <div class="meta">
+        &gt;_status: <b>LOCKED</b><br>
+        &gt;_cipher: <b>AES-256-GCM</b><br>
+        &gt;_attempts: <b>RATE-LIMITED</b>
+      </div>
+    </section>
+
+    <section class="term" aria-label="Sign in">
+      <h2>&gt;_IDENTIFY</h2>
+      <p class="l">Only the owner of this system may continue.</p>
+
+      {% if error %}
+      <div class="err" role="alert"><b>ACCESS DENIED</b>{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('login') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label for="password">Dashboard password</label>
+        <div class="prompt"><i>&gt;</i>
+          <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12" placeholder="************" autofocus>
+        </div>
+        <button type="submit">[ AUTHENTICATE ]</button>
+      </form>
+      <p class="note">At least 12 characters. Five wrong tries in a minute locks this page for a minute.</p>
+    </section>
+  </main>
+  <div class="hazard"></div>
+  <div class="foot"><span>VER 5.0</span><span>NOTHING LEAVES UNENCRYPTED</span></div>
+</div>
+<script>
+(function(){
+"use strict";
+/* Halftone eye: a dot-matrix drawing that follows the pointer, blinks and glitches. */
+function HalftoneEye(canvas, cell){
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width, H = canvas.height;
+  var gw = Math.floor(W / cell), gh = Math.floor(H / cell);
+  var look = {x:0, y:0}, tgt = {x:0, y:0}, blink = 0, blinkAt = 60, frame = 0;
+  var wipe = -1, wipeDir = 1, nextWipe = 90;
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var green = (getComputedStyle(document.documentElement).getPropertyValue("--g") || "#39ff6a").trim();
+  window.addEventListener("pointermove", function(e){
+    var r = canvas.getBoundingClientRect();
+    tgt.x = Math.max(-1, Math.min(1, (e.clientX - (r.left + r.width / 2)) / (window.innerWidth / 2)));
+    tgt.y = Math.max(-1, Math.min(1, (e.clientY - (r.top + r.height / 2)) / (window.innerHeight / 2)));
+  });
+  function lum(i, j, open, lx, ly){
+    var cx = gw / 2, cy = gh / 2;
+    var a = gw * 0.47, b = gh * 0.40 * open;
+    var nx = (i - cx) / a;
+    if (Math.abs(nx) >= 1) return 0;
+    var lid = Math.pow(1 - nx * nx, 0.85) * b;
+    var dy = j - cy;
+    var edge = Math.abs(Math.abs(dy) - lid);
+    if (Math.abs(dy) > lid + 1.2) return 0;
+    if (edge < 1.1) return 1;
+    if (Math.abs(dy) > lid) return 0;
+    var ix = cx + lx * gw * 0.12, iy = cy + ly * gh * 0.12;
+    var r = gh * 0.31;
+    var d = Math.sqrt((i - ix) * (i - ix) + (j - iy) * (j - iy));
+    var ang = Math.atan2(j - iy, i - ix);
+    var v = 0.22 + 0.10 * (1 - Math.abs(nx));
+    if (d < r) {
+      v = 0.45 + 0.30 * (d / r) + 0.18 * Math.sin(ang * 16 + d * 0.4);
+      if (d > r * 0.9) v = 0.9;
+      if (d < r * 0.40) v = 0.05;
+    }
+    var hx = ix - r * 0.35, hy = iy - r * 0.35;
+    if ((i - hx) * (i - hx) + (j - hy) * (j - hy) < 3.2) v = 1;
+    var shade = Math.max(0, 1 - Math.abs(dy) / (lid + 0.01));
+    return Math.max(0, Math.min(1, v * (0.55 + 0.45 * shade)));
+  }
+  function draw(){
+    frame++;
+    look.x += (tgt.x - look.x) * 0.12; look.y += (tgt.y - look.y) * 0.12;
+    if (!reduce) {
+      if (frame === blinkAt) { blink = 0.001; }
+      if (blink > 0) { blink += 0.16; if (blink >= 2) { blink = 0; blinkAt = frame + 70 + Math.floor(Math.random() * 120); } }
+      if (frame === nextWipe) { wipe = 0; wipeDir = 1; }
+      if (wipe >= 0) {
+        wipe += 0.045 * wipeDir;
+        if (wipe >= 1) { wipeDir = -1; wipe = 1; nextWipe = Infinity; setTimeout(function(){ wipeDir = -1; }, 0); }
+        if (wipeDir === -1 && wipe <= 0) { wipe = -1; nextWipe = frame + 120 + Math.floor(Math.random() * 160); }
+      }
+    }
+    var open = blink > 0 ? Math.abs(1 - blink) : 1;
+    open = Math.max(0.04, open);
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = green;
+    var glitchRows = {};
+    if (!reduce && Math.random() < 0.05) {
+      for (var g = 0; g < 4; g++) glitchRows[Math.floor(Math.random() * gh)] = Math.floor(Math.random() * 9 - 4);
+    }
+    for (var j = 0; j < gh; j++) {
+      var shift = glitchRows[j] || 0;
+      for (var i = 0; i < gw; i++) {
+        if (wipe >= 0 && (i / gw + j / gh * 0.6) / 1.6 < wipe) continue;
+        var l = lum(i - shift, j, open, look.x, look.y);
+        if (l <= 0.03) continue;
+        var rad = cell * 0.5 * Math.pow(l, 0.75);
+        ctx.beginPath();
+        ctx.arc(i * cell + cell / 2 + shift * 0, j * cell + cell / 2, rad, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+  }
+  var timer = setInterval(draw, 55);
+  draw();
+  return function stop(){ clearInterval(timer); };
+}
+
+HalftoneEye(document.getElementById("eye"),5);
+function c(){document.getElementById("clk").textContent=new Date().toLocaleTimeString([], {hour12:false})}
+c();setInterval(c,1000);
+})();
+</script>
+</body>
+</html>
